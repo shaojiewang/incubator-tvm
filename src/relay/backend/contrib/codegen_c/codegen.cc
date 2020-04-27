@@ -20,35 +20,85 @@
 #include <tvm/relay/transform.h>
 #include <tvm/relay/type.h>
 #include <tvm/runtime/module.h>
+#include <tvm/runtime/ndarray.h>
 #include <tvm/runtime/object.h>
 
 #include <fstream>
 #include <sstream>
 
+#include "../../utils.h"
 #include "codegen_c.h"
 
 namespace tvm {
 namespace relay {
 namespace contrib {
 
+using namespace backend;
+
 /*!
  * \brief An example codegen that is only used for quick prototyping and testing
  * purpose. Only several binary options are covered. Users
  * may need to extend them to cover more operators.
  */
-class CodegenC : public ExprVisitor, public CodegenCBase {
+class CodegenC : public MemoizedExprTranslator<std::vector<Output>>, public CodegenCBase {
  public:
   explicit CodegenC(const std::string& id) { this->ext_func_id_ = id; }
 
-  void VisitExpr_(const VarNode* node) {
-    ext_func_args_.push_back(GetRef<Var>(node));
-    out_.clear();
-    Output output;
-    output.name = node->name_hint();
-    out_.push_back(output);
+  std::vector<Output> VisitExprDefault_(const Object* op) final {
+    LOG(FATAL) << "C codegen doesn't support: " << op->GetTypeKey();
+    return {};
   }
 
-  void VisitExpr_(const CallNode* call) final {
+  std::vector<Output> VisitExpr_(const VarNode* node) final {
+    ext_func_args_.push_back(GetRef<Var>(node));
+    Output output;
+    output.name = node->name_hint();
+    return {output};
+  }
+
+  std::vector<Output> VisitExpr_(const ConstantNode* cn) final {
+    // Note this is for demonstration purpose. ConstantNode doesn't necessarily
+    // belong to calls. We need to revisit this when tuples come into play.
+
+    std::ostringstream decl_stream;
+    std::ostringstream buf_stream;
+
+    Output output;
+    output.name = "const_" + std::to_string(const_idx_++);
+
+    runtime::NDArray array = cn->data;
+    const auto& shape = array.Shape();
+
+    // Get the number of elements.
+    int64_t num_elems = 1;
+    for (auto i : shape) num_elems *= i;
+
+    const auto* type_node = cn->checked_type().as<TensorTypeNode>();
+    CHECK(type_node);
+    const auto& dtype = GetDtypeString(type_node);
+    // Define a const buffer: float const_0[64] = {1.0, 2.0, ...};
+    //
+    // Technically, you may need: static float* const_0 = (float*)malloc(4 * 64)
+    // to avoid possible stack overflow.
+    buf_stream << dtype << " " << output.name << "[" << num_elems << "] = {";
+    if (dtype == "float") {
+      float* p_flt = static_cast<float*>(array->data);
+      for (int64_t i = 0; i < num_elems - 1; i++) buf_stream << p_flt[i] << ", ";
+      if (num_elems) buf_stream << p_flt[num_elems - 1];
+    } else if (dtype == "int") {
+      int* p_flt = static_cast<int*>(array->data);
+      for (int64_t i = 0; i < num_elems - 1; i++) buf_stream << p_flt[i] << ", ";
+      if (num_elems) buf_stream << p_flt[num_elems - 1];
+    } else {
+      LOG(FATAL) << "Only float and int are supported for now.";
+    }
+    buf_stream << "};";
+    ext_func_body.insert(ext_func_body.begin(), buf_stream.str());
+
+    return {output};
+  }
+
+  std::vector<Output> VisitExpr_(const CallNode* call) final {
     std::ostringstream macro_stream;
     std::ostringstream decl_stream;
     std::ostringstream buf_stream;
@@ -85,8 +135,8 @@ class CodegenC : public ExprVisitor, public CodegenCBase {
     bool first = true;
     decl_stream << func_name << "(";
     for (size_t i = 0; i < call->args.size(); ++i) {
-      VisitExpr(call->args[i]);
-      for (auto out : out_) {
+      auto res = VisitExpr(call->args[i]);
+      for (auto out : res) {
         if (!first) {
           decl_stream << ", ";
         }
@@ -109,13 +159,14 @@ class CodegenC : public ExprVisitor, public CodegenCBase {
     ext_func_body.push_back(decl_stream.str());
 
     // Update output buffer
-    out_.clear();
+    // Note C codegen only handles TensorType. Therefore, we don't flatten
+    // tuples and only return a single vaule.
     Output output;
     output.name = out;
     output.dtype = dtype;
     output.need_copy = true;
     output.size = out_size;
-    out_.push_back(output);
+    return {output};
   }
 
   /*!
@@ -123,12 +174,12 @@ class CodegenC : public ExprVisitor, public CodegenCBase {
    *
    * \return The emitted code.
    */
-  std::string JIT() {
+  std::string JIT(const std::vector<Output>& out) {
     // Write function macros
     for (auto decl : func_decl_) {
       code_stream_ << decl << "\n";
     }
-    return JitImpl(ext_func_id_, ext_func_args_, buf_decl_, ext_func_body, out_);
+    return JitImpl(ext_func_id_, ext_func_args_, buf_decl_, ext_func_body, out);
   }
 
  private:
@@ -138,6 +189,8 @@ class CodegenC : public ExprVisitor, public CodegenCBase {
   int func_idx = 0;
   /*! \brief The index of allocated buffers. */
   int buf_idx_ = 0;
+  /*! \brief The index of global constants. */
+  int const_idx_ = 0;
   /*! \brief The arguments of a C compiler compatible function. */
   Array<Var> ext_func_args_;
   /*! \brief The statements of a C compiler compatible function. */
@@ -146,8 +199,6 @@ class CodegenC : public ExprVisitor, public CodegenCBase {
   std::vector<std::string> func_decl_;
   /*! \brief The declaration statements of buffers. */
   std::vector<std::string> buf_decl_;
-  /*! \brief The name and index pairs for output. */
-  std::vector<Output> out_;
 };
 
 class CSourceCodegen : public CSourceModuleCodegenBase {
@@ -159,8 +210,8 @@ class CSourceCodegen : public CSourceModuleCodegenBase {
     auto sid = GetExtSymbol(func);
 
     CodegenC builder(sid);
-    builder.VisitExpr(func->body);
-    code_stream_ << builder.JIT();
+    auto out = builder.VisitExpr(func->body);
+    code_stream_ << builder.JIT(out);
   }
 
   runtime::Module CreateCSourceModule(const ObjectRef& ref) override {

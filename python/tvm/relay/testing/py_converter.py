@@ -23,7 +23,8 @@ import tvm
 from tvm import relay
 from tvm.relay.adt import Pattern
 from tvm.relay.backend import compile_engine
-from tvm.relay.expr import Expr, Function, GlobalVar, Var
+from tvm.relay.expr import Expr, GlobalVar, Var
+from tvm.relay.function import Function
 from tvm.relay.expr_functor import ExprFunctor
 
 OUTPUT_VAR_NAME = '_py_out'
@@ -94,8 +95,8 @@ class PythonConverter(ExprFunctor):
 
         # necessary pass: SimplifyInference (otherwise we can't generate code for some operators)
         # and fusion (to get primitive functions)
-        opts = relay.transform.Sequential([relay.transform.SimplifyInference(),
-                                           relay.transform.FuseOps(fuse_opt_level=0)])
+        opts = tvm.transform.Sequential([relay.transform.SimplifyInference(),
+                                         relay.transform.FuseOps(fuse_opt_level=0)])
         mod = opts(mod)
         optimized = mod['main']
         return optimized if isinstance(unwrapped, Function) else optimized.body
@@ -237,7 +238,7 @@ class PythonConverter(ExprFunctor):
 
         # compile the function and register globally
         cc_key = compile_engine.CCacheKey(op, self.tgt)
-        func_hash = relay.analysis.structural_hash(op)
+        func_hash = tvm.ir.structural_hash(op)
         op_name = '_lowered_op_{}'.format(func_hash)
         if not tvm.get_global_func(op_name, allow_missing=True):
             jitted = self.engine.jit(cc_key, self.tgt)

@@ -59,6 +59,7 @@ enum SignType {
 class IntSetNode : public Object {
  public:
   static constexpr const char* _type_key = "IntSet";
+  static constexpr bool _type_has_method_sequal_reduce = false;
   TVM_DECLARE_BASE_OBJECT_INFO(IntSetNode, Object);
 };
 
@@ -152,6 +153,13 @@ class IntSet : public ObjectRef {
 // Integer set legacy API.
 //------------------------------------------------
 /*!
+ * \brief Convert std::unordered_map<const VarNode*, IntSet> to Map<Var, IntSet>
+ *
+ * \param dom_map The domain map to convert.
+ * \return The converted map.
+ */
+Map<Var, IntSet> ConvertDomMap(const std::unordered_map<const VarNode*, IntSet>& dom_map);
+/*!
  * \brief Find an symbolic integer set that contains all possible values of
  *  e given the domain of each iteration variables.
  *
@@ -159,8 +167,7 @@ class IntSet : public ObjectRef {
  * \param dom_map The domain of each variable.
  * \return An integer set that can cover all the possible values of e.
  */
-IntSet EvalSet(PrimExpr e,
-               const Map<IterVar, IntSet>& dom_map);
+IntSet EvalSet(PrimExpr e, const Map<IterVar, IntSet>& dom_map);
 /*!
  * \brief Same as EvalSet, but takes unordered_map
  *
@@ -170,7 +177,6 @@ IntSet EvalSet(PrimExpr e,
  */
 IntSet EvalSet(PrimExpr e,
                const std::unordered_map<const tir::VarNode*, IntSet>& dom_map);
-
 /*!
  * \brief Find an symbolic integer set that contains is union over
  *  all the possible conditional values in dom_map.
@@ -201,7 +207,6 @@ IntSet EvalSet(IntSet s,
  */
 IntSet EvalSet(Range r,
                const std::unordered_map<const VarNode*, IntSet>& dom_map);
-
 /*! \brief Map from Expr to IntSet */
 using ExprIntSetMap = std::unordered_map<PrimExpr, IntSet, ObjectHash, ObjectEqual>;
 /*!

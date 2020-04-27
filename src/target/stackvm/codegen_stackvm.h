@@ -26,7 +26,6 @@
 
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/lowered_func.h>
 #include <tvm/target/codegen.h>
 #include <string>
 #include <vector>
@@ -56,7 +55,7 @@ class CodeGenStackVM
    * \note Only call compile once,
    *  create a new codegen object each time.
    */
-  StackVM Compile(LoweredFunc f);
+  StackVM Compile(const PrimFunc& f);
   /*! \brief Push stmt to generate new code */
   void Push(const Stmt& n);
   /*! \brief Push expr to generate new code */
@@ -148,7 +147,6 @@ class CodeGenStackVM
   void VisitStmt_(const AssertStmtNode* op) final;
   void VisitStmt_(const EvaluateNode* op) final;
   void VisitStmt_(const SeqStmtNode* op) final;
-  void VisitStmt_(const ProducerConsumerNode* op) final;
 
  private:
   bool debug_{false};

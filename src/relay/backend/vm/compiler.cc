@@ -40,7 +40,7 @@
 #include <vector>
 #include "../utils.h"
 #include "../../backend/compile_engine.h"
-#include "../../pass/pass_util.h"
+#include "../../transforms/pass_util.h"
 #include "../../op/op_common.h"
 #include "compiler.h"
 
@@ -193,38 +193,30 @@ TreeObjectPtr BuildDecisionTreeFromClauses(MatchValuePtr data, tvm::Array<Clause
   return else_branch;
 }
 
-std::vector<int64_t> ToAllocTensorShape64(NDArray shape) {
+std::vector<int64_t> ToAllocTensorShape(NDArray shape) {
   std::vector<int64_t> raw_shape;
-  DLTensor tensor = shape.ToDLPack()->dl_tensor;
-  CHECK_EQ(tensor.ndim, 1u);
-  CHECK_EQ(tensor.dtype.code, 0U) << "found " << tensor.dtype.code;
+  CHECK_EQ(shape->ndim, 1u);
+  CHECK_EQ(shape->dtype.code, 0U)
+    << "The dtype of constant shape must be int32 or int64, but got "
+    << DLDataType2String(shape->dtype);
+  CHECK(shape->dtype.bits == 64 || shape->dtype.bits == 32)
+    << "The dtype of constant shape must be int32 or int64, but got"
+    << DLDataType2String(shape->dtype);
 
-  // TODO(@jroesch): we really need to standaridize the bit width of
-  // all of the shape manipulating code.
-  CHECK_EQ(tensor.dtype.bits, 64) << "found " << tensor.dtype.bits;
-  int64_t* int_ptr = reinterpret_cast<int64_t*>(tensor.data);
-  for (auto i = 0; i < tensor.shape[0]; i++) {
-    raw_shape.push_back(int_ptr[i]);
+  if (shape->dtype.bits == 64) {
+    int64_t* int_ptr = reinterpret_cast<int64_t*>(shape->data);
+    for (auto i = 0; i < shape->shape[0]; i++) {
+      raw_shape.push_back(int_ptr[i]);
+    }
+  } else {  // int32
+    int32_t* int_ptr = reinterpret_cast<int32_t*>(shape->data);
+    for (auto i = 0; i < shape->shape[0]; i++) {
+      raw_shape.push_back(static_cast<int64_t>(int_ptr[i]));
+    }
   }
   return raw_shape;
 }
 
-
-std::vector<int64_t> ToAllocTensorShape32(NDArray shape) {
-  std::vector<int64_t> raw_shape;
-  DLTensor tensor = shape.ToDLPack()->dl_tensor;
-  CHECK_EQ(tensor.ndim, 1u);
-  CHECK_EQ(tensor.dtype.code, 0U) << "found " << tensor.dtype.code;
-
-  // TODO(@jroesch): we really need to standaridize the bit width of
-  // all of the shape manipulating code.
-  CHECK_LE(tensor.dtype.bits, 32) << "found " << tensor.dtype.bits;
-  int32_t* int_ptr = reinterpret_cast<int32_t*>(tensor.data);
-  for (auto i = 0; i < tensor.shape[0]; i++) {
-    raw_shape.push_back(static_cast<int64_t>(int_ptr[i]));
-  }
-  return raw_shape;
-}
 
 class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
  public:
@@ -366,7 +358,9 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
     this->Emit(Instruction::If(test_register, target_register, 0, 0));
     this->VisitExpr(if_node->true_branch);
 
-    size_t true_register = last_register_;
+    // It saves the result of If-Else expression.
+    auto merge_register = NewRegister();
+    Emit(Instruction::Move(last_register_, merge_register));
     Emit(Instruction::Goto(0));
 
     // Finally store how many instructions there are in the
@@ -378,7 +372,7 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
     size_t false_register = last_register_;
 
     // In else-branch, override the then-branch register
-    Emit(Instruction::Move(false_register, true_register));
+    Emit(Instruction::Move(false_register, merge_register));
     // Compute the total number of instructions
     // after generating false.
     auto after_false = this->instructions_.size();
@@ -397,20 +391,23 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
     // Patch the Goto.
     this->instructions_[after_true - 1].pc_offset = (after_false - after_true) + 1;
 
-    this->last_register_ = true_register;
+    this->last_register_ = merge_register;
   }
 
   void EmitShapeFunc(Function func, Array<Expr> inputs, Array<Expr> outputs) {
     // Lower shape function
-    auto key = CCacheKeyNode::make(func, target_host_);
+    CCacheKey key(func, target_host_);
     auto cfunc = engine_->LowerShapeFunc(key);
     int op_index = -1;
-    if (context_->seen_funcs.count(cfunc->funcs[0]) == 0) {
+    // pick the only function inside the context
+    CHECK_EQ(cfunc->funcs->functions.size(), 1);
+    auto pfunc = Downcast<tir::PrimFunc>((*cfunc->funcs->functions.begin()).second);
+    if (context_->seen_funcs.count(pfunc) == 0) {
       op_index = context_->cached_funcs.size();
       context_->cached_funcs.push_back(cfunc);
-      context_->seen_funcs[cfunc->funcs[0]] = op_index;
+      context_->seen_funcs[pfunc] = op_index;
     } else {
-      op_index = context_->seen_funcs[cfunc->funcs[0]];
+      op_index = context_->seen_funcs[pfunc];
     }
 
     // Prepare input and output registers
@@ -440,7 +437,7 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
                        const Expr& outputs) {
     std::vector<Index> argument_registers;
 
-    CHECK(func->IsPrimitive())
+    CHECK(func->GetAttr<Integer>(attr::kPrimitive, 0) != 0)
       << "internal error: invoke_tvm_op requires the first argument to be a relay::Function";
 
     auto input_tuple = inputs.as<TupleNode>();
@@ -469,7 +466,7 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
 
     Target target;
 
-    if (!func->UseDefaultCompiler()) {
+    if (func->GetAttr<String>(attr::kCompiler).defined()) {
       target = tvm::target::ext_dev();
     } else {
       // Next generate the invoke instruction.
@@ -483,22 +480,23 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
       }
     }
 
-    auto key = CCacheKeyNode::make(func, target);
+    CCacheKey key(func, target);
     auto cfunc = engine_->Lower(key);
 
     auto op_index = -1;
-    if (!func->UseDefaultCompiler()) {
+    if (func->GetAttr<String>(attr::kCompiler).defined()) {
       op_index = context_->cached_funcs.size();
       context_->cached_funcs.push_back(cfunc);
     } else {
       // TODO(jroesch): support lowered funcs for multiple targets
-      CHECK_EQ(cfunc->funcs.size(), 1);
-      if (context_->seen_funcs.find(cfunc->funcs[0]) == context_->seen_funcs.end()) {
+      CHECK_EQ(cfunc->funcs->functions.size(), 1);
+      auto pfunc = Downcast<tir::PrimFunc>((*cfunc->funcs->functions.begin()).second);
+      if (context_->seen_funcs.find(pfunc) == context_->seen_funcs.end()) {
         op_index = context_->cached_funcs.size();
         context_->cached_funcs.push_back(cfunc);
-        context_->seen_funcs[cfunc->funcs[0]] = op_index;
+        context_->seen_funcs[pfunc] = op_index;
       } else {
-        op_index = context_->seen_funcs[cfunc->funcs[0]];
+        op_index = context_->seen_funcs[pfunc];
       }
     }
 
@@ -539,17 +537,8 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
 
           if (const_shape) {
             NDArray shape = const_shape->data;
-            std::vector<int64_t> raw_shape;
-            DLTensor tensor = shape.ToDLPack()->dl_tensor;
-            // TODO(@jroesch): we need to get an RFC done to standarize this
-            if (tensor.dtype.bits == 64) {
-              raw_shape = ToAllocTensorShape64(shape);
-            } else if (tensor.dtype.bits == 32) {
-              raw_shape = ToAllocTensorShape32(shape);
-            } else {
-              LOG(FATAL) << "unsupported bitwidth: " << tensor.dtype.bits;
-            }
-
+            // TODO(@jroesch): we need to get an RFC done to standarize shape dtype
+            std::vector<int64_t> raw_shape = ToAllocTensorShape(shape);
             // Add context field.
             Emit(Instruction::AllocTensor(storage_register, raw_shape, dtype, NewRegister()));
           } else {
@@ -572,7 +561,7 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
           auto alignment_register = last_register_;
 
           // Get the dtype hint from the attributes.
-          auto alloc_attrs = attrs.as<AllocTensorAttrs>();
+          auto alloc_attrs = attrs.as<AllocStorageAttrs>();
           CHECK(alloc_attrs != nullptr)
               << "must be the alloc tensor attrs";
           auto dtype = alloc_attrs->dtype;
@@ -648,7 +637,7 @@ class VMFunctionCompiler : ExprFunctor<void(const Expr& expr)> {
   }
 
   void VisitExpr_(const FunctionNode* func_node) {
-    if (!func_node->IsPrimitive()) {
+    if (!func_node->HasNonzeroAttr(attr::kPrimitive)) {
       LOG(FATAL) << "local functions should have been removed by lambda lifting:" << std::endl
                  << "Program: " << AsText(GetRef<Function>(func_node), false) << std::endl
                  << "AST: " << GetRef<Function>(func_node);
@@ -778,7 +767,7 @@ PackedFunc VMCompiler::GetFunction(const std::string& name,
     return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
       Map<std::string, Constant> ret;
       for (const auto& kv : params_) {
-        ret.Set(kv.first, ConstantNode::make(kv.second));
+        ret.Set(kv.first, Constant(kv.second));
       }
       *rv = ret;
     });
@@ -860,17 +849,13 @@ void VMCompiler::Lower(IRModule mod,
   // update primitive function map
   size_t primitive_index = 0;
   for (const auto& cfunc : context_.cached_funcs) {
-    if (cfunc->target->str() == "ext_dev") {
-      exec_->primitive_map.insert({cfunc->func_name, primitive_index++});
-    } else {
-      exec_->primitive_map.insert({cfunc->funcs[0]->name, primitive_index++});
-    }
+    exec_->primitive_map.insert({cfunc->func_name, primitive_index++});
   }
 }
 
 IRModule VMCompiler::OptimizeModule(const IRModule& mod, const TargetsMap& targets) {
   Array<Pass> pass_seqs;
-  Array<tvm::PrimExpr> entry_functions{tvm::PrimExpr{"main"}};
+  Array<runtime::String> entry_functions{"main"};
   pass_seqs.push_back(transform::RemoveUnusedFunctions(entry_functions));
   // Run all dialect legalization passes.
   pass_seqs.push_back(relay::qnn::transform::Legalize());
@@ -934,6 +919,7 @@ IRModule VMCompiler::OptimizeModule(const IRModule& mod, const TargetsMap& targe
   pass_seqs.push_back(transform::FoldConstant());
   // Fuse the shape functions.
   pass_seqs.push_back(transform::FuseOps());
+
   // Manifest the allocations needed for the shape functions.
   pass_seqs.push_back(transform::ManifestAlloc(this->target_host_));
 
@@ -959,8 +945,6 @@ void VMCompiler::PopulateGlobalMap() {
 }
 
 void VMCompiler::Codegen() {
-  using tir::LoweredFunc;
-
   if (!context_.module.defined()) {
     LOG(WARNING) << "Did you forget to call VMCompiler::Lower?";
     return;
@@ -969,15 +953,21 @@ void VMCompiler::Codegen() {
   if (cached_funcs.size() == 0) {
     return;
   }
-  std::unordered_map<std::string, Array<LoweredFunc>> funcs;
+  std::unordered_map<std::string, IRModule> funcs;
+
   for (auto& cfunc : cached_funcs) {
     std::string target_str = cfunc->target->str();
+    // NOTE: because module, is mutable, we need to make an
+    // explicit copy of the IRModule.
+    IRModule mod = cfunc->funcs;
+    mod.CopyOnWrite();
+
     if (target_str == "ext_dev") {
       continue;
     } else if (funcs.count(target_str) == 0) {
-      funcs.emplace(target_str, Array<LoweredFunc>{cfunc->funcs[0]});
+      funcs.emplace(target_str, mod);
     } else {
-      funcs[target_str].push_back(cfunc->funcs[0]);
+      funcs[target_str]->Update(mod);
     }
   }
 

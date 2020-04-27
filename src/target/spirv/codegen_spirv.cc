@@ -22,7 +22,7 @@
  * \brief Generate SPIRV block
  */
 #include <tvm/tir/expr.h>
-#include <tvm/tir/ir_pass.h>
+#include <tvm/runtime/container.h>
 #include <string>
 #include "codegen_spirv.h"
 #include "../../arith/compute_expr.h"
@@ -30,18 +30,20 @@
 namespace tvm {
 namespace codegen {
 
-std::vector<uint32_t> CodeGenSPIRV::BuildFunction(const LoweredFunc& f) {
+std::vector<uint32_t> CodeGenSPIRV::BuildFunction(const PrimFunc& f) {
   this->InitFuncState();
-  CHECK(f->is_restricted)
+  CHECK(f->HasNonzeroAttr(tir::attr::kNoAlias))
       << "SPIRV only takes restricted memory model";
   std::vector<Var> pod_args;
   uint32_t num_buffer = 0;
-  for (Var arg : f->args) {
+
+  for (Var arg : f->params) {
     DataType t = arg.dtype();
     if (t.is_handle()) {
-      auto it = f->handle_data_type.find(arg);
-      if (it != f->handle_data_type.end()) {
-        DataType value_type = (*it).second.dtype();
+      if (auto* ptr = arg->type_annotation.as<PointerTypeNode>()) {
+        auto* prim = ptr->element_type.as<PrimTypeNode>();
+        CHECK(prim);
+        DataType value_type = prim->dtype;
         spirv::Value arg_value = builder_->BufferArgument(
             builder_->GetSType(value_type), 0, num_buffer);
         storage_info_[arg.get()].UpdateContentType(value_type);
@@ -75,7 +77,12 @@ std::vector<uint32_t> CodeGenSPIRV::BuildFunction(const LoweredFunc& f) {
   builder_->MakeInst(spv::OpReturn);
   builder_->MakeInst(spv::OpFunctionEnd);
 
-  builder_->CommitKernelFunction(func_ptr, f->name);
+  auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+  CHECK(global_symbol.defined())
+      << "CodeGenSPIRV: Expect PrimFunc to have the global_symbol attribute";
+
+  builder_->CommitKernelFunction(
+    func_ptr, static_cast<std::string>(global_symbol.value()));
 
   return builder_->Finalize();
 }
@@ -95,11 +102,11 @@ spirv::Value CodeGenSPIRV::GetThreadIndex(
   spirv::Value v;
   if (ts.rank == 1) {
     v = builder_->GetLocalID(ts.dim_index);
-    int size = 0;
-    CHECK(arith::GetConstInt(extent, &size))
+    auto* sizeptr = extent.as<tir::IntImmNode>();
+    CHECK(sizeptr)
         << "SPIRV only allows constant thread group size " << " get " << extent;
     CHECK_LT(ts.dim_index, 3);
-    workgroup_size_[ts.dim_index] = static_cast<uint32_t>(size);
+    workgroup_size_[ts.dim_index] = static_cast<uint32_t>(sizeptr->value);
   } else {
     v = builder_->GetWorkgroupID(ts.dim_index);
   }
@@ -406,7 +413,7 @@ spirv::Value CodeGenSPIRV::VisitExpr_(const LoadNode* op) {
           CHECK((me->coeff % ramp->lanes) == 0 &&
                 (me->base % ramp->lanes)  == 0)
               << "Only aligned vector access is allowed in SPIRV";
-          PrimExpr vec_index = tir::Simplify(
+          PrimExpr vec_index = analyzer_->Simplify(
               ramp->base / make_const(ramp->base.dtype(), ramp->lanes));
           spirv::Value ptr = builder_->StructArrayAccess(
               ptr_type, buffer, MakeValue(vec_index));
@@ -484,7 +491,7 @@ void CodeGenSPIRV::VisitStmt_(const StoreNode* op) {
           CHECK((me->coeff % ramp->lanes) == 0 &&
                 (me->base % ramp->lanes)  == 0)
               << "Only aligned vector access is allowed in SPIRV";
-          PrimExpr vec_index = tir::Simplify(
+          PrimExpr vec_index = analyzer_->Simplify(
               ramp->base / make_const(ramp->base.dtype(), ramp->lanes));
           spirv::Value ptr = builder_->StructArrayAccess(
               ptr_type, buffer, MakeValue(vec_index));
@@ -578,7 +585,6 @@ void CodeGenSPIRV::VisitStmt_(const IfThenElseNode* op) {
 
 void CodeGenSPIRV::VisitStmt_(const AllocateNode* op) {
   CHECK(!is_zero(op->condition));
-  CHECK(!op->new_expr.defined());
   CHECK(!op->dtype.is_handle());
   int32_t constant_size = op->constant_allocation_size();
   CHECK_GT(constant_size, 0)
@@ -607,7 +613,7 @@ void CodeGenSPIRV::VisitStmt_(const AllocateNode* op) {
 }
 
 void CodeGenSPIRV::VisitStmt_(const AttrStmtNode* op) {
-  if (op->attr_key == attr::thread_extent) {
+  if (op->attr_key == tir::attr::thread_extent) {
     IterVar iv = Downcast<IterVar>(op->node);
     if (iv->thread_tag.length() != 0) {
       if (!var_map_.count(iv->var.get())) {
@@ -649,10 +655,6 @@ void CodeGenSPIRV::VisitStmt_(const SeqStmtNode* op) {
 
 void CodeGenSPIRV::VisitStmt_(const EvaluateNode* op) {
   MakeValue(op->value);
-}
-
-void CodeGenSPIRV::VisitStmt_(const ProducerConsumerNode* op) {
-  this->VisitStmt(op->body);
 }
 
 }  // namespace codegen

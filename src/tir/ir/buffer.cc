@@ -24,7 +24,9 @@
 #include <tvm/tir/buffer.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/tir/expr.h>
-#include <tvm/tir/ir_pass.h>
+#include <tvm/tir/analysis.h>
+#include <tvm/arith/analyzer.h>
+
 #include <iterator>
 #include <stack>
 #include "../../arith/compute_expr.h"
@@ -35,9 +37,9 @@ namespace tir {
 using IndexMod = tir::FloorModNode;
 using IndexDiv = tir::FloorDivNode;
 
-Array<PrimExpr> SimplifyArray(Array<PrimExpr> array) {
+Array<PrimExpr> SimplifyArray(arith::Analyzer* ana, Array<PrimExpr> array) {
   for (size_t i = 0; i < array.size(); ++i) {
-    array.Set(i, tir::Simplify(array[i]));
+    array.Set(i, ana->Simplify(array[i]));
   }
   return array;
 }
@@ -46,7 +48,7 @@ Buffer decl_buffer(Array<PrimExpr> shape,
                    DataType dtype,
                    std::string name) {
   return BufferNode::make(
-      Var(name, DataType::Handle()),
+      Var(name, PointerType(PrimType(dtype))),
       dtype,
       shape,
       Array<PrimExpr>(),
@@ -112,6 +114,8 @@ inline std::pair<bool, PrimExpr> MergeMulModInner(const PrimExpr &mult_expr,
   const PrimExpr* search_ptr = inner;
   PrimExpr mult_inner;  // The inner multiplication factor
   PrimExpr no_opt_sum;  // Sum of the exprs that cannot be optimized
+  tir::ExprDeepEqual expr_equal;
+
   while (true) {
     auto inner_div_ptr = search_ptr->as<IndexDiv>();
     auto inner_mult_ptr = search_ptr->as<MulNode>();
@@ -120,9 +124,9 @@ inline std::pair<bool, PrimExpr> MergeMulModInner(const PrimExpr &mult_expr,
       return std::make_pair(false, PrimExpr());
     } else if (inner_div_ptr) {
       PrimExpr overall_mult = mult_inner.get() ? mult_inner * mult_outer : mult_outer;
-      if (Equal(overall_mult, inner_div_ptr->b)
-          && Equal(overall_mult, mod_r_expr)
-          && Equal(inner_div_ptr->a, mod_l_expr)) {
+      if (expr_equal(overall_mult, inner_div_ptr->b)
+          && expr_equal(overall_mult, mod_r_expr)
+          && expr_equal(inner_div_ptr->a, mod_l_expr)) {
         // Found!
         PrimExpr ret = no_opt_sum.get() ? no_opt_sum * mult_outer + mod_l_expr : mod_l_expr;
         return std::make_pair(true, ret);
@@ -181,14 +185,14 @@ inline void MergeMulModInsertElements(const std::vector<const PrimExpr*>& eles,
 // The search will be performed repeatively until no pattern is found.
 // Return: a pair with (false, Expr()) if cannot be optimized.
 //         a pair with (true, optimized_expr) if can be optimized
-inline PrimExpr MergeMulMod(const PrimExpr &base) {
+inline PrimExpr MergeMulMod(arith::Analyzer* analyzer, const PrimExpr &base) {
   using namespace tir;
   // 1. Prepare the lists.
   // We store two lists, a list that contain all the elements that match Mul and
   //                     a list that contain all the elements that match Mod.
   // The elements in the Mod will be used to match against the elements in Mul.
   // The result will then be split and pushed back to these two lists.
-  PrimExpr simplified_base = Simplify(base);
+  PrimExpr simplified_base = analyzer->Simplify(base);
   std::vector<const PrimExpr*> eles = ExprSplitAddition(simplified_base);
   std::list<PrimExpr> mult_exprs;
   std::list<std::pair<PrimExpr, PrimExpr> > mod_exprs;
@@ -250,6 +254,7 @@ inline PrimExpr MergeMulMod(const PrimExpr &base) {
 // We also perform optimization to simplify the indexing expression.
 inline PrimExpr ElemOffset(const BufferNode* n, Array<PrimExpr> index) {
   PrimExpr base = n->elem_offset;
+  arith::Analyzer ana;
   if (n->strides.size() == 0) {
     // Scalar case
     if (n->shape.size() == 0 && index.size() == 1) {
@@ -261,7 +266,7 @@ inline PrimExpr ElemOffset(const BufferNode* n, Array<PrimExpr> index) {
       if (index.size() > 0) {
         PrimExpr offset = index[0];
         for (size_t i = 1; i < index.size(); ++i) {
-          offset = MergeMulMod(offset * n->shape[i] + index[i]);
+          offset = MergeMulMod(&ana, offset * n->shape[i] + index[i]);
         }
         base = base + offset;
       }
@@ -269,12 +274,12 @@ inline PrimExpr ElemOffset(const BufferNode* n, Array<PrimExpr> index) {
   } else {
     CHECK_EQ(n->strides.size(), index.size());
     if (is_zero(base)) {
-      base = MergeMulMod(index[0] * n->strides[0]);
+      base = MergeMulMod(&ana, index[0] * n->strides[0]);
     } else {
-      base = MergeMulMod(base + index[0] * n->strides[0]);
+      base = MergeMulMod(&ana, base + index[0] * n->strides[0]);
     }
     for (size_t i = 1; i < index.size(); ++i) {
-      base = MergeMulMod(base + index[i] * n->strides[i]);
+      base = MergeMulMod(&ana, base + index[i] * n->strides[i]);
     }
   }
   return base;
@@ -349,8 +354,9 @@ Buffer Buffer::MakeStrideView() const {
 
 Buffer Buffer::MakeSlice(Array<PrimExpr> begins, Array<PrimExpr> extents) const {
   const BufferNode* n = operator->();
-  begins = SimplifyArray(begins);
-  PrimExpr elem_offset = tir::Simplify(ElemOffset(n, begins));
+  arith::Analyzer ana;
+  begins = SimplifyArray(&ana, begins);
+  PrimExpr elem_offset = ana.Simplify(ElemOffset(n, begins));
   Array<PrimExpr> strides = n->strides;
   if (strides.size() == 0) {
     bool can_relax = true;
@@ -359,7 +365,7 @@ Buffer Buffer::MakeSlice(Array<PrimExpr> begins, Array<PrimExpr> extents) const 
     for (size_t i = 0; i < extents.size(); ++i) {
       if (!can_relax) {
         if (!is_zero(begins[i]) ||
-            !is_zero(tir::Simplify(extents[i] - n->shape[i]))) {
+            !is_zero(ana.Simplify(extents[i] - n->shape[i]))) {
           need_stride = true;
         }
       }
@@ -448,7 +454,7 @@ Buffer BufferNode::make(Var data,
   n->buffer_type = buffer_type;
   if (n->buffer_type == kAutoBroadcast && n->shape.size() > 0 && n->strides.empty()) {
     for (size_t i = 0; i < n->shape.size(); ++i) {
-      n->strides.push_back(Var("stride"));
+      n->strides.push_back(Var("stride", n->shape[i].dtype()));
     }
   }
   return Buffer(n);

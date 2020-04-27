@@ -28,13 +28,12 @@
 #include <tvm/relay/expr_functor.h>
 #include <tvm/runtime/device_api.h>
 
-
 #include <list>
 #include <string>
 #include <vector>
 
-#include "utils.h"
 #include "compile_engine.h"
+#include "utils.h"
 
 namespace tvm {
 namespace relay {
@@ -55,7 +54,7 @@ using TargetsMap = std::unordered_map<int, Target>;
 /*! \brief Lowered outputs */
 struct LoweredOutput {
   std::string graph_json;
-  Map<std::string, Array<tir::LoweredFunc> > lowered_funcs;
+  Map<std::string, IRModule> lowered_funcs;
   Array<tvm::runtime::Module> external_mods;
   std::unordered_map<std::string, tvm::runtime::NDArray> params;
 };
@@ -190,11 +189,9 @@ class GraphOpNode : public GraphNode {
 };
 
 /*! \brief Code generator for graph runtime */
-class GraphRuntimeCodegen
-    : public ::tvm::relay::ExprFunctor<std::vector<GraphNodeRef>(const Expr&)> {
+class GraphRuntimeCodegen : public backend::MemoizedExprTranslator<std::vector<GraphNodeRef>> {
  public:
-  GraphRuntimeCodegen(runtime::Module* mod, const TargetsMap& targets)
-      : mod_(mod) {
+  GraphRuntimeCodegen(runtime::Module* mod, const TargetsMap& targets) : mod_(mod) {
     compile_engine_ = CompileEngine::Global();
     targets_ = targets;
   }
@@ -214,19 +211,14 @@ class GraphRuntimeCodegen
     LoweredOutput ret;
     ret.graph_json = os.str();
     ret.params = params_;
+
     for (auto& kv : lowered_funcs_) {
       if (ret.lowered_funcs.count(kv.first) == 0) {
-        ret.lowered_funcs.Set(kv.first, Array<tir::LoweredFunc>());
+        ret.lowered_funcs.Set(kv.first, IRModule::Empty());
       }
-      auto& vec = ret.lowered_funcs[kv.first];
-      Array<tir::LoweredFunc> tmp;
-      for (auto f : kv.second) {
-        tmp.push_back(f);
-      }
-      for (auto f : vec) {
-        tmp.push_back(f);
-      }
-      ret.lowered_funcs.Set(kv.first, tmp);
+      auto& mod = ret.lowered_funcs[kv.first];
+      mod->Update(kv.second);
+      ret.lowered_funcs.Set(kv.first, mod);
     }
     ret.external_mods = compile_engine_->LowerExternalFunctions();
     return ret;
@@ -318,47 +310,6 @@ class GraphRuntimeCodegen
     return {GraphNodeRef(node_id, 0)};
   }
 
-  /*! \brief Visitors */
-  std::unordered_map<Expr, std::vector<GraphNodeRef>, ObjectHash, ObjectEqual> visitor_cache_;
-
-  std::vector<GraphNodeRef> VisitExpr(const Expr& expr) override {
-    if (visitor_cache_.count(expr)) return visitor_cache_.at(expr);
-    std::vector<GraphNodeRef> res;
-    if (expr.as<ConstantNode>()) {
-      res = VisitExpr_(expr.as<ConstantNode>());
-    } else if (expr.as<TupleNode>()) {
-      res = VisitExpr_(expr.as<TupleNode>());
-    } else if (expr.as<VarNode>()) {
-      res = VisitExpr_(expr.as<VarNode>());
-    } else if (expr.as<GlobalVarNode>()) {
-      res = VisitExpr_(expr.as<GlobalVarNode>());
-    } else if (expr.as<FunctionNode>()) {
-      res = VisitExpr_(expr.as<FunctionNode>());
-    } else if (expr.as<CallNode>()) {
-      res = VisitExpr_(expr.as<CallNode>());
-    } else if (expr.as<LetNode>()) {
-      res = VisitExpr_(expr.as<LetNode>());
-    } else if (expr.as<IfNode>()) {
-      res = VisitExpr_(expr.as<IfNode>());
-    } else if (expr.as<OpNode>()) {
-      res = VisitExpr_(expr.as<OpNode>());
-    } else if (expr.as<TupleGetItemNode>()) {
-      res = VisitExpr_(expr.as<TupleGetItemNode>());
-    } else if (expr.as<RefCreateNode>()) {
-      res = VisitExpr_(expr.as<RefCreateNode>());
-    } else if (expr.as<RefReadNode>()) {
-      res = VisitExpr_(expr.as<RefReadNode>());
-    } else if (expr.as<RefWriteNode>()) {
-      res = VisitExpr_(expr.as<RefWriteNode>());
-    } else if (expr.as<ConstructorNode>()) {
-      res = VisitExpr_(expr.as<ConstructorNode>());
-    } else if (expr.as<MatchNode>()) {
-      res = VisitExpr_(expr.as<MatchNode>());
-    }
-    visitor_cache_[expr] = res;
-    return res;
-  }
-
   std::vector<GraphNodeRef> VisitExpr_(const VarNode* op) override {
     Expr expr = GetRef<Expr>(op);
     return var_map_[expr.get()];
@@ -415,7 +366,7 @@ class GraphRuntimeCodegen
     } else {
       LOG(FATAL) << "TVM runtime does not support calls to " << op->op->GetTypeKey();
     }
-    if (!func->IsPrimitive()) {
+    if (!func->HasNonzeroAttr(attr::kPrimitive)) {
       LOG(FATAL) << "TVM only support calls to primitive functions "
                  << "(i.e functions composed of fusable operator invocations)";
     }
@@ -424,7 +375,7 @@ class GraphRuntimeCodegen
     auto pf1 = GetPackedFunc("relay.backend._CompileEngineLower");
     Target target;
     // Handle external function
-    if (!func->UseDefaultCompiler()) {
+    if (func->GetAttr<String>(attr::kCompiler).defined()) {
       target = tvm::target::ext_dev();
       CCacheKey key = (*pf0)(func, target);
       CachedFunc ext_func = (*pf1)(compile_engine_, key);
@@ -457,12 +408,9 @@ class GraphRuntimeCodegen
     CCacheKey key = (*pf0)(func, target);
     CachedFunc lowered_func = (*pf1)(compile_engine_, key);
     if (!lowered_funcs_.count(target->str())) {
-      lowered_funcs_[target->str()] = {};
+      lowered_funcs_[target->str()] = IRModule::Empty();
     }
-    for (auto f : lowered_func->funcs) {
-      lowered_funcs_[target->str()].insert(f);
-    }
-
+    lowered_funcs_[target->str()]->Update(lowered_func->funcs);
     return GraphAddCallNode(op,
                            _GetUniqueName(lowered_func->func_name),
                            lowered_func->func_name);
@@ -490,7 +438,8 @@ class GraphRuntimeCodegen
     return {};
   }
   std::vector<GraphNodeRef> VisitExpr_(const FunctionNode* op) override {
-    CHECK(!op->UseDefaultCompiler()) << "Only functions supported by custom codegen";
+    CHECK(op->GetAttr<String>(attr::kCompiler).defined())
+        << "Only functions supported by custom codegen";
     return {};
   }
   std::vector<GraphNodeRef> VisitExpr_(const RefCreateNode* op) override {
@@ -601,8 +550,7 @@ class GraphRuntimeCodegen
   /*! \brief plan memory of device result */
   Map<Expr, Array<IntegerArray>> storage_device_map_;
   /*! \brief lowered funcs */
-  std::unordered_map<std::string, std::unordered_set<tir::LoweredFunc, ObjectHash, ObjectEqual>>
-      lowered_funcs_;
+  std::unordered_map<std::string, IRModule> lowered_funcs_;
   /*! \brief name map */
   std::unordered_map<std::string, size_t> name_map_;
   /*! \brief compile engine */
@@ -641,10 +589,9 @@ class GraphRuntimeCodegenModule : public runtime::ModuleNode {
       });
     } else if (name == "list_params_name") {
       return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
-        Array<tvm::PrimExpr> ret;
+        Array<runtime::String> ret;
         for (const auto &kv : this->output_.params) {
-          tvm::PrimExpr name = tir::StringImmNode::make(kv.first);
-          ret.push_back(name);
+          ret.push_back(kv.first);
         }
         *rv = ret;
       });
@@ -654,7 +601,7 @@ class GraphRuntimeCodegenModule : public runtime::ModuleNode {
         CHECK_GT(this->output_.params.count(key), 0);
         *rv = this->output_.params[key];
       });
-    } else if (name == "get_lowered_funcs") {
+    } else if (name == "get_irmodule") {
       return PackedFunc([sptr_to_self, this](TVMArgs args, TVMRetValue* rv) {
         *rv = this->output_.lowered_funcs;
       });

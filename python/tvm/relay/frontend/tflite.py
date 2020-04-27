@@ -17,6 +17,7 @@
 # pylint: disable=invalid-name, unused-argument, too-many-lines, import-outside-toplevel
 """Tensorflow lite frontend."""
 import math
+import itertools
 import numpy as np
 import tvm
 from tvm.ir import IRModule
@@ -24,9 +25,9 @@ from tvm.ir import IRModule
 from tvm import relay
 from .. import analysis
 from .. import expr as _expr
+from .. import function as _function
 from .. import op as _op
 from .. import qnn as _qnn
-from ..util import get_scalar_from_constant
 from ... import nd as _nd
 from .common import ExprTable
 from .common import infer_shape as _infer_shape
@@ -62,70 +63,80 @@ class OperatorConverter(object):
         # Add more operators
         self.convert_map = {
             'ABS': self.convert_abs,
-            'EXP': self.convert_exp,
-            'FLOOR': self.convert_floor,
-            'CEIL': self.convert_ceil,
-            'LOG': self.convert_log,
-            'SIN': self.convert_sin,
-            'COS': self.convert_cos,
-            'TAN': self.convert_tan,
-            'SQRT': self.convert_sqrt,
-            'RSQRT': self.convert_rsqrt,
-            'NEG': self.convert_neg,
-            'CONV_2D': self.convert_conv2d,
-            'DEPTHWISE_CONV_2D': self.convert_depthwise_conv2d,
+            'ADD': self.convert_add,
             'AVERAGE_POOL_2D': self.convert_average_pool2d,
+            'BATCH_TO_SPACE_ND': self.convert_batch_to_space_nd,
+            'CAST': self.convert_cast,
+            'CEIL': self.convert_ceil,
+            'CONCATENATION': self.convert_concatenation,
+            'CONV_2D': self.convert_conv2d,
+            'COS': self.convert_cos,
+            'DEPTH_TO_SPACE': self.convert_depth_to_space,
+            'DEPTHWISE_CONV_2D': self.convert_depthwise_conv2d,
+            'DETECTION_POSTPROCESS': self.convert_detection_postprocess,
+            'DIV': self.convert_div,
+            'ELU': self.convert_elu,
+            'EQUAL': self.convert_equal,
+            'EXP': self.convert_exp,
+            'FLOOR_DIV': self.convert_floor_div,
+            'FLOOR_MOD': self.convert_floor_mod,
+            'FLOOR': self.convert_floor,
+            'FULLY_CONNECTED': self.convert_fully_connected,
+            'GATHER': self.convert_gather,
+            'GREATER_EQUAL': self.convert_greater_equal,
+            'GREATER': self.convert_greater,
+            'HARD_SWISH': self.convert_hard_swish,
+            'L2_NORMALIZATION': self.convert_l2_normalization,
+            'LESS_EQUAL': self.convert_less_equal,
+            'LESS': self.convert_less,
+            'LOCAL_RESPONSE_NORMALIZATION': self.convert_lrn,
+            'LOG': self.convert_log,
+            'LOGICAL_AND': self.convert_logical_and,
+            'LOGICAL_OR': self.convert_logical_or,
+            'LOGISTIC': self.convert_logistic,
+            'MAX_POOL_2D': self.convert_max_pool2d,
+            'MAXIMUM': self.convert_maximum,
+            'MEAN': self._convert_reduce_mean,
+            'MINIMUM': self.convert_minimum,
+            'MIRROR_PAD': self.convert_mirror_pad,
+            'MUL': self.convert_mul,
+            'NEG': self.convert_neg,
+            'NOT_EQUAL': self.convert_not_equal,
+            'PACK': self.convert_pack,
+            'PAD': self.convert_pad,
+            'POW': self.convert_pow,
+            'PRELU': self.convert_prelu,
+            'REDUCE_ANY': self._convert_reduce_any,
+            'REDUCE_MAX': self._convert_reduce_max,
+            'REDUCE_MIN': self._convert_reduce_min,
+            'REDUCE_PROD': self._convert_reduce_prod,
+            'RELU':self.convert_relu,
             'RESHAPE': self.convert_reshape,
             'RESIZE_BILINEAR': self.convert_resize_bilinear,
             'RESIZE_NEAREST_NEIGHBOR': self.convert_resize_nearest_neighbor,
-            'SOFTMAX': self.convert_softmax,
-            'SQUEEZE': self.convert_squeeze,
-            'MAX_POOL_2D': self.convert_max_pool2d,
-            'CONCATENATION': self.convert_concatenation,
-            'ADD': self.convert_add,
-            'SUB': self.convert_sub,
-            'MUL': self.convert_mul,
-            'DIV': self.convert_div,
-            'POW': self.convert_pow,
-            'MAXIMUM': self.convert_maximum,
-            'MINIMUM': self.convert_minimum,
-            'GREATER': self.convert_greater,
-            'GREATER_EQUAL': self.convert_greater_equal,
-            'LESS': self.convert_less,
-            'LESS_EQUAL': self.convert_less_equal,
-            'EQUAL': self.convert_equal,
-            'NOT_EQUAL': self.convert_not_equal,
-            'ZEROS_LIKE': self.convert_zeros_like,
-            'REDUCE_MIN': self._convert_reduce_min,
-            'REDUCE_MAX': self._convert_reduce_max,
-            'MEAN': self._convert_reduce_mean,
-            'REDUCE_PROD': self._convert_reduce_prod,
-            'SUM': self._convert_reduce_sum,
-            'FULLY_CONNECTED': self.convert_fully_connected,
-            'PAD': self.convert_pad,
-            'MIRROR_PAD': self.convert_mirror_pad,
-            'PACK': self.convert_pack,
-            'UNPACK': self.convert_unpack,
-            'LOGISTIC': self.convert_logistic,
-            'TANH':self.convert_tanh,
-            'RELU':self.convert_relu,
-            'SPLIT': self.convert_split,
+            'ROUND': self.convert_round,
+            'RSQRT': self.convert_rsqrt,
+            'SIN': self.convert_sin,
             'SLICE': self.convert_slice,
-            'TRANSPOSE': self.convert_transpose,
-            'CAST': self.convert_cast,
-            'TILE': self.convert_tile,
-            'BATCH_TO_SPACE_ND': self.convert_batch_to_space_nd,
+            'SOFTMAX': self.convert_softmax,
             'SPACE_TO_BATCH_ND': self.convert_space_to_batch_nd,
-            'PRELU': self.convert_prelu,
-            'TRANSPOSE_CONV': self.convert_transpose_conv,
-            'SQUARED_DIFFERENCE': self.convert_squared_difference,
-            'LOGICAL_AND': self.convert_logical_and,
-            'LOGICAL_OR': self.convert_logical_or,
-            'DETECTION_POSTPROCESS': self.convert_detection_postprocess,
+            'SPACE_TO_DEPTH': self.convert_space_to_depth,
+            'SPLIT': self.convert_split,
+            'SQRT': self.convert_sqrt,
             'SQUARE': self.convert_square,
-            'L2_NORMALIZATION': self.convert_l2_normalization,
-            'FLOOR_DIV': self.convert_floor_div,
-            'FLOOR_MOD': self.convert_floor_mod,
+            'SQUARED_DIFFERENCE': self.convert_squared_difference,
+            'SQUEEZE': self.convert_squeeze,
+            'STRIDED_SLICE': self.convert_strided_slice,
+            'SUB': self.convert_sub,
+            'SUM': self._convert_reduce_sum,
+            'TAN': self.convert_tan,
+            'TANH':self.convert_tanh,
+            'TILE': self.convert_tile,
+            'TOPK_V2': self.convert_topk_v2,
+            'TRANSPOSE_CONV': self.convert_transpose_conv,
+            'TRANSPOSE': self.convert_transpose,
+            'UNPACK': self.convert_unpack,
+            'ZEROS_LIKE': self.convert_zeros_like,
         }
 
     def check_unsupported_ops(self):
@@ -150,7 +161,12 @@ class OperatorConverter(object):
             op = self.subgraph.Operators(op_idx)
             op_code_str = self.get_op_code_str(op)
             output_tensors = self.get_output_tensors(op)
+            try:
+                from tflite.Operator import Operator
+            except ImportError:
+                raise ImportError("The tflite package must be installed")
 
+            assert isinstance(op, Operator)
             ret = self.convert_map[op_code_str](op)
 
             if len(output_tensors) == 1:
@@ -279,12 +295,6 @@ class OperatorConverter(object):
 
     def is_quantized(self, op):
         """Check if an input tensor is quantized."""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         first_tensor = input_tensors[0]
         return first_tensor.qnn_params is not None
@@ -326,12 +336,10 @@ class OperatorConverter(object):
         """Convert TFLite reshape"""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
-            from tflite.Operator import Operator
             from tflite.ReshapeOptions import ReshapeOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert input_tensors, "input tensors should not be empty"
         input_tensor = input_tensors[0]
@@ -359,7 +367,6 @@ class OperatorConverter(object):
         """Generic method to Convert TFLite RESIZE operators"""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
-            from tflite.Operator import Operator
             from tflite.ResizeBilinearOptions import ResizeBilinearOptions
             # ResizeNearestNeighborOptions was added in tflite v1.13
             tflite_ver = 1120
@@ -369,7 +376,6 @@ class OperatorConverter(object):
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
 
@@ -412,14 +418,12 @@ class OperatorConverter(object):
     def convert_l2_normalization(self, op):
         """Convert TFLite L2_NORMALIZATION """
         try:
-            from tflite.Operator import Operator
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.L2NormOptions import L2NormOptions
             from tflite.ActivationFunctionType import ActivationFunctionType
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
         input_tensor = input_tensors[0]
@@ -455,14 +459,43 @@ class OperatorConverter(object):
 
         return out
 
-    def convert_logistic(self, op):
-        """Convert TFLite LOGISTIC"""
+    def convert_lrn(self, op):
+        """Convert TFLite LOCAL_RESPONSE_NORMALIZATION """
         try:
-            from tflite.Operator import Operator
+            from tflite.BuiltinOptions import BuiltinOptions
+            from tflite.LocalResponseNormalizationOptions import LocalResponseNormalizationOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
+        if self.is_quantized(op):
+            raise tvm.error.OpNotImplemented(
+                'TFlite quantized LRN operator is not supported yet.')
+
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+        input_tensor = input_tensors[0]
+        in_expr = self.get_expr(input_tensor.tensor_idx)
+
+        output_tensors = self.get_output_tensors(op)
+        assert len(output_tensors) == 1, "output tensors length should be 1"
+
+        assert op.BuiltinOptionsType() == BuiltinOptions.LocalResponseNormalizationOptions
+        op_options = op.BuiltinOptions()
+        lrn_options = LocalResponseNormalizationOptions()
+        lrn_options.Init(op_options.Bytes, op_options.Pos)
+        radius = lrn_options.Radius()
+        bias = lrn_options.Bias()
+        alpha = lrn_options.Alpha()
+        beta = lrn_options.Beta()
+        size = (radius * 2) + 1
+        alpha = alpha * size
+        axis = 3 # NHWC format
+        out = _op.nn.lrn(in_expr, size=size, axis=axis, bias=bias, alpha=alpha, beta=beta)
+
+        return out
+
+    def convert_logistic(self, op):
+        """Convert TFLite LOGISTIC"""
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
 
@@ -483,12 +516,6 @@ class OperatorConverter(object):
 
     def convert_softmax(self, op):
         """Convert TFLite softmax"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
 
@@ -518,12 +545,6 @@ class OperatorConverter(object):
 
     def convert_tanh(self, op):
         """Convert TFLite TANH"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
 
@@ -535,12 +556,6 @@ class OperatorConverter(object):
 
     def convert_relu(self, op):
         """Convert TFLite ReLU"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
 
@@ -550,17 +565,45 @@ class OperatorConverter(object):
 
         return out
 
+    def convert_hard_swish(self, op):
+        """Convert TFLite Hard swish"""
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+        input_tensor = input_tensors[0]
+        in_expr = self.get_expr(input_tensor.tensor_idx)
+
+        output_tensors = self.get_output_tensors(op)
+        assert len(output_tensors) == 1, "output tensors length should be 1"
+        output_tensor = output_tensors[0]
+
+        def _relu6(data):
+            return _op.tensor.clip(data, 0.0, 6.0)
+
+        def _hard_swish(data):
+            return data * _relu6(data + relay.const(3.0)) / relay.const(6.0)
+
+        # Dequantize if the input is quantized.
+        if input_tensor.qnn_params:
+            in_expr = self.dequantize(in_expr, input_tensor)
+
+        # Perform hardswish
+        out = _hard_swish(in_expr)
+
+        # Go back to integer dataype if the original operator was quantized.
+        if output_tensor.qnn_params:
+            out = self.quantize(out, output_tensor)
+
+        return out
+
     def convert_concatenation(self, op):
         """Convert TFLite concatenation"""
         try:
-            from tflite.Operator import Operator
             from tflite.ConcatenationOptions import ConcatenationOptions
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.ActivationFunctionType import ActivationFunctionType
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) >= 1, "input tensors should greater than 1"
         in_exprs = [self.get_expr(input_tensor.tensor_idx) for input_tensor in input_tensors]
@@ -601,12 +644,6 @@ class OperatorConverter(object):
 
     def _convert_unary_elemwise(self, relay_op, op):
         """Generic method to convert TFLite unary elemwise functions"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
 
@@ -636,6 +673,13 @@ class OperatorConverter(object):
             raise tvm.error.OpNotImplemented(
                 'TFlite quantized FLOOR operator is not supported yet.')
         return self._convert_unary_elemwise(_op.floor, op)
+
+    def convert_round(self, op):
+        """Convert TFLite ROUND"""
+        if self.is_quantized(op):
+            raise tvm.error.OpNotImplemented(
+                'TFlite quantized ROUND operator is not supported yet.')
+        return self._convert_unary_elemwise(_op.round, op)
 
     def convert_exp(self, op):
         """Convert TFLite EXP"""
@@ -693,14 +737,25 @@ class OperatorConverter(object):
                 'TFlite quantized NEG operator is not supported yet.')
         return self._convert_unary_elemwise(_op.negative, op)
 
+    def convert_elu(self, op):
+        """Convert TFLite ELU"""
+        if self.is_quantized(op):
+            raise tvm.error.OpNotImplemented(
+                'TFlite quantized ELU operator is not supported yet.')
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+
+        input_tensor = input_tensors[0]
+        in_expr = self.get_expr(input_tensor.tensor_idx)
+        exp_type = self.get_tensor_type_str(input_tensor.tensor.Type())
+        out = relay.const(-1.0, exp_type) * \
+              _op.nn.relu(relay.const(1., exp_type) - _op.exp(in_expr)) + \
+              _op.nn.relu(in_expr)
+
+        return out
+
     def convert_square(self, op):
         """Convert TFLite SQUARE"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
         input_tensor = input_tensors[0]
@@ -722,7 +777,6 @@ class OperatorConverter(object):
     def _convert_elemwise(self, relay_op, op):
         """Generic method to Convert TFLite elemwise"""
         try:
-            from tflite.Operator import Operator
             from tflite.AddOptions import AddOptions
             from tflite.SubOptions import SubOptions
             from tflite.MulOptions import MulOptions
@@ -732,7 +786,6 @@ class OperatorConverter(object):
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
 
@@ -814,8 +867,7 @@ class OperatorConverter(object):
         """Convert TFLite SUB"""
         # Check if the input tensor is quantized, call QNN op
         if self.is_quantized(op):
-            raise tvm.error.OpNotImplemented(
-                'TFlite quantized SUB operator is not supported yet.')
+            return self._convert_elemwise(_qnn.op.subtract, op)
         return self._convert_elemwise(_op.subtract, op)
 
     def convert_mul(self, op):
@@ -914,12 +966,6 @@ class OperatorConverter(object):
 
     def _convert_logical_binary(self, relay_op, op):
         """Generic method to convert logical binary ops"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
 
@@ -939,14 +985,219 @@ class OperatorConverter(object):
         """Convert tflite LOGICAL_OR"""
         return self._convert_logical_binary(_op.logical_or, op)
 
-    def convert_zeros_like(self, op):
-        """Convert TFLite ZEROS LIKE"""
+    def convert_gather(self, op):
+        """Method to Convert TFLite GATHER operator"""
         try:
-            from tflite.Operator import Operator
+            from tflite.BuiltinOptions import BuiltinOptions
+            from tflite.GatherOptions import GatherOptions
+            from tflite.TensorType import TensorType
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 2, "input tensors length should be 2"
+
+        data = self.get_expr(input_tensors[0].tensor_idx)
+
+        indices = input_tensors[1]
+        indices_type = indices.tensor.Type()
+        assert indices_type in (TensorType.INT32, TensorType.INT64)
+        indices_type_str = self.get_tensor_type_str(indices_type)
+        indices = self.exp_tab.new_const(self.get_tensor_value(indices),
+                                         dtype=indices_type_str)
+
+        assert op.BuiltinOptionsType() == BuiltinOptions.GatherOptions
+        op_options = op.BuiltinOptions()
+        gather_options = GatherOptions()
+        gather_options.Init(op_options.Bytes, op_options.Pos)
+        axis = gather_options.Axis()
+
+        # Check the indices are with in bounds.
+        data_shape = list(input_tensors[0].tensor.ShapeAsNumpy())
+        data_dim = len(data_shape)
+
+        axis_n = axis
+        if axis_n < 0:
+            axis_n += axis_n + data_dim
+        assert axis_n >= 0, "Axis out of bounds"
+        assert axis_n < data_dim, "Axis out of bounds"
+
+        indices_val = self.get_tensor_value(input_tensors[1])
+        indices_shape = list(indices_val.shape)
+        indices_len = len(indices_shape)
+
+        out_shape = []
+        for i in range(data_dim):
+            if axis_n == i:
+                for j in range(indices_len):
+                    out_shape.append(indices_shape[j])
+            else:
+                out_shape.append(data_shape[i])
+
+        loopover = [range(s) for s in out_shape]
+        for idx in list(itertools.product(*loopover)):
+            indices_position = [idx[j] for j in range(axis_n, axis_n+indices_len)]
+
+            real_indices = [idx[j] for j in range(axis_n)]
+            real_indices.append(indices_val[tuple(indices_position)])
+            real_indices.extend([idx[j] for j in range(axis_n + indices_len, len(idx))])
+            for r, d in zip(real_indices, data_shape):
+                if r >= d:
+                    raise ValueError("TFLite out of bound indices are not supported.")
+
+        # Use mode 'fast' since indices are already checked within bounds.
+        out = _op.take(data, indices, axis=axis, mode="fast")
+        return out
+
+    def convert_strided_slice(self, op):
+        """Method to Convert TFLite STRIDED_SLICE operator.
+           NOTE: Eventhough tensorflow supports begin_mask, end_mask, ellipsis_mask, new_axis_mask
+           and shrink_axis_mask, tflite doesn't support these and expect these values to be zero.
+           But in future, they may open up the mask implementation, so kept the implementation
+           same as tensorflow.
+
+           This op extracts a slice of size (end - begin) / stride from the given input tensor.
+           Starting at the location specified by begin the slice continues by adding stride to the
+           index until all dimensions are not less than end. Note that a stride can be negative,
+           which causes a reverse slice.
+
+           For slice input[val0, val1, ..., valn], begin/end/strides will be vectors of length n.
+
+           In each mask field(begin_mask, end_mask, ellipsis_mask, new_axis_mask, shrink_axis_mask)
+           the ith bit will correspond to the ith val.
+
+           If the ith bit of begin_mask is set, begin[i] is ignored and the fullest possible range
+           in that dimension is used instead.
+
+           If the ith bit of ellipsis_mask is set, as many unspecified dimensions as needed will be
+           inserted between other dimensions. Only one non-zero bit is allowed in ellipsis_mask.
+
+           If the ith bit of new_axis_mask is set, then begin, end, and stride are ignored and a
+           new length 1 dimension is added at this point in the output tensor.
+
+           If the ith bit of shrink_axis_mask is set, it implies that the ith specification shrinks
+           the dimensionality by 1, taking on the value at index begin[i]. end[i] and strides[i]
+           are ignored in this case.
+           begin and end are zero-indexed. strides entries must be non-zero.
+
+           TVM Relay implementation of doesn't support mask, so the mask values are processed in
+           this function and begin/end/strides are updated accordingly. If any mask is present, and
+           since tvm doesn't support mask computation directly, the output need a final reshape.
+        """
+        try:
+            from tflite.BuiltinOptions import BuiltinOptions
+            from tflite.StridedSliceOptions import StridedSliceOptions
+        except ImportError:
+            raise ImportError("The tflite package must be installed")
+
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 4, "input tensors length should be 4"
+
+        data_expr = self.get_expr(input_tensors[0].tensor_idx)
+
+        begin = list(self.get_tensor_value(input_tensors[1]))
+        end = list(self.get_tensor_value(input_tensors[2]))
+        stride = list(self.get_tensor_value(input_tensors[3]))
+
+        assert op.BuiltinOptionsType() == BuiltinOptions.StridedSliceOptions
+        op_options = op.BuiltinOptions()
+        options = StridedSliceOptions()
+        options.Init(op_options.Bytes, op_options.Pos)
+        begin_mask = options.BeginMask()
+        end_mask = options.EndMask()
+        ellipsis_mask = options.EllipsisMask()
+        new_axis_mask = options.NewAxisMask()
+        shrink_axis_mask = options.ShrinkAxisMask()
+
+        data_shape = list(input_tensors[0].tensor.ShapeAsNumpy())
+        data_dim = len(data_shape)
+        stride_dim = len(stride)
+        def _transform_mask(stride_dim, ellipsis_mask):
+            """Handle mask inputs to create new begin, end, stride and output shape"""
+            m_begin = [0] * data_dim
+            m_end = [0] * data_dim
+            m_stride = [0] * data_dim
+            fshape_indices = []
+            #Count new axis after ellipsis_mask, consider while applying ellipsis_mask.
+            ellipsis_seen = False
+            new_axes_after_ellipsis = 0
+            for i in range(stride_dim):
+                mask = 1 << i
+                if ellipsis_seen and (mask & new_axis_mask) != 0:
+                    new_axes_after_ellipsis += 1
+                if (mask & ellipsis_mask) != 0:
+                    ellipsis_seen = True
+            if not ellipsis_seen:
+                #Used later for extending the stride attributes in the below loop.
+                ellipsis_mask |= (1 << stride_dim)
+                stride_dim += 1
+            final_index = 0
+            for index in range(stride_dim):
+                mask = 1 << index
+                if mask & ellipsis_mask:
+                    #Identify the end index for applying ellipsis_mask
+                    to_index = min(((data_dim - (stride_dim-index)) + 1 \
+                                     + new_axes_after_ellipsis), data_dim)
+                    for i in range(final_index, to_index):
+                        m_begin[final_index] = 0
+                        m_end[final_index] = data_shape[final_index]
+                        m_stride[final_index] = 1
+                        fshape_indices.append(final_index)
+                        final_index += 1
+                elif mask &new_axis_mask:
+                    fshape_indices.append(-1)
+                elif not mask & new_axis_mask:
+                    if final_index == len(m_begin):
+                        break
+                    if mask & begin_mask:
+                        m_begin[final_index] = data_shape[final_index] \
+                                                     if stride[index] < 0 else 0
+                    elif begin[index]:
+                        m_begin[final_index] = begin[index]
+                    if mask & end_mask:
+                        m_end[final_index] = 0 if stride[index] < 0 \
+                                                 else data_shape[final_index]
+                    elif end[index]:
+                        m_end[final_index] = end[index]
+                    m_stride[final_index] = stride[index]
+                    if mask & shrink_axis_mask:
+                        #Tensorflow make axis with shrink_axis_mask as dimension 1
+                        m_begin[final_index] = data_shape[final_index] + begin[index] \
+                                                 if begin[index] < 0 else begin[index]
+                        m_end[final_index] = begin[index] + 1
+                        m_stride[final_index] = 1
+                        fshape_indices.append(-2)
+                    else:
+                        fshape_indices.append(final_index)
+
+                    final_index += 1
+            return m_begin, m_end, m_stride, fshape_indices
+
+        fshape_indices = None
+        if begin_mask or end_mask or ellipsis_mask or new_axis_mask or shrink_axis_mask:
+            begin, end, stride, fshape_indices = _transform_mask(stride_dim, ellipsis_mask)
+
+        out = _op.strided_slice(data_expr, begin=begin, end=end, strides=stride)
+        out_shape = _infer_shape(out)
+        if not fshape_indices:
+            fshape_indices = range(len(out_shape))
+
+        #Create final output shape.
+        final_output = []
+        for gather_index in fshape_indices:
+            if gather_index == -1:
+                final_output.append(1)
+            elif gather_index == -2:
+                pass
+            else:
+                final_output.append(out_shape[gather_index])
+
+        if not final_output:
+            return out
+        return _op.reshape(out, newshape=tuple(final_output))
+
+    def convert_zeros_like(self, op):
+        """Convert TFLite ZEROS LIKE"""
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
 
@@ -960,12 +1211,10 @@ class OperatorConverter(object):
         """Generic method to Convert TFLite MEAN operators"""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
-            from tflite.Operator import Operator
             from tflite.ReducerOptions import ReducerOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
 
@@ -1018,10 +1267,12 @@ class OperatorConverter(object):
     def _convert_reduce_sum(self, op):
         return self._convert_reduce(_op.reduce.sum, op)
 
+    def _convert_reduce_any(self, op):
+        return self._convert_reduce(_op.reduce.any, op)
+
     def convert_fully_connected(self, op):
         """Convert TFLite fully connected"""
         try:
-            from tflite.Operator import Operator
             from tflite.FullyConnectedOptions import FullyConnectedOptions
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.TensorType import TensorType
@@ -1029,7 +1280,6 @@ class OperatorConverter(object):
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) >= 2, "input tensors length should be >= 2"
 
@@ -1124,12 +1374,10 @@ class OperatorConverter(object):
         """Convert TFLite squeeze"""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
-            from tflite.Operator import Operator
             from tflite.SqueezeOptions import SqueezeOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         output_tensors = self.get_output_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
@@ -1173,14 +1421,12 @@ class OperatorConverter(object):
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.ActivationFunctionType import ActivationFunctionType
             from tflite.TensorType import TensorType
-            from tflite.Operator import Operator
             from tflite.Conv2DOptions import Conv2DOptions
             from tflite.DepthwiseConv2DOptions import DepthwiseConv2DOptions
             from tflite.Padding import Padding
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) >= 2, "input tensors length should be >= 2"
 
@@ -1240,7 +1486,9 @@ class OperatorConverter(object):
         if is_depthwise_conv:
             params['channels'] = int(in_channels)
             params['groups'] = int(input_c)
-            params['kernel_layout'] = 'HWOI'
+            # If number of input channels is 1, treat as normal
+            # convolution.
+            params['kernel_layout'] = 'HWIO' if input_c == 1 else 'HWOI'
         else:
             params['channels'] = int(output_channels)
             params['kernel_layout'] = 'HWIO'
@@ -1273,13 +1521,7 @@ class OperatorConverter(object):
             pad_left, pad_right = get_pad_value(input_w, dilated_kernel_w, stride_w)
             do_pad = not (pad_top == 0 and pad_bottom == 0 and pad_left == 0 and pad_right == 0)
             if do_pad:
-                pad_value = 0
-                if input_tensor.qnn_params:
-                    pad_value = get_scalar_from_constant(input_tensor.qnn_params['zero_point'])
-                in_expr = _op.nn.pad(data=in_expr, pad_width=((0, 0),
-                                                              (pad_top, pad_bottom),
-                                                              (pad_left, pad_right),
-                                                              (0, 0)), pad_value=float(pad_value))
+                params['padding'] = [pad_top, pad_left, pad_bottom, pad_right]
 
         else:
             raise tvm.error.OpAttributeUnImplemented(
@@ -1339,12 +1581,10 @@ class OperatorConverter(object):
         """split implementation."""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
-            from tflite.Operator import Operator
             from tflite.SplitOptions import SplitOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
 
         assert len(input_tensors) == 2, "input tensors length should be == 2"
@@ -1374,12 +1614,6 @@ class OperatorConverter(object):
 
     def convert_slice(self, op):
         """Convert TFLite SLICE"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 3, "input tensors length should be == 3"
         input_tensor = input_tensors[0]
@@ -1403,12 +1637,6 @@ class OperatorConverter(object):
 
     def convert_transpose(self, op):
         """transpose implementation."""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
         input_tensor = input_tensors[0]
@@ -1429,13 +1657,11 @@ class OperatorConverter(object):
     def convert_cast(self, op):
         """Convert TFLite CAST"""
         try:
-            from tflite.Operator import Operator
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.CastOptions import CastOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
         input_tensor = input_tensors[0]
@@ -1453,12 +1679,6 @@ class OperatorConverter(object):
 
     def convert_tile(self, op):
         """tile implementation."""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
         input_tensor = input_tensors[0]
@@ -1473,18 +1693,28 @@ class OperatorConverter(object):
 
         return out
 
+    def convert_topk_v2(self, op):
+        """ Convert TFLite TOPK_v2 """
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 2, "input tensors length should be 2"
+        input_tensor = input_tensors[0]
+        input_tensor_idx = input_tensor.tensor_idx
+        in_expr = self.get_expr(input_tensor_idx)
+        k = self.get_tensor_value(input_tensors[1])
+        out = _op.topk(in_expr, int(k))
+
+        return out
+
     def convert_pool2d(self, op, pool_type):
         """pool2d implementation."""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.ActivationFunctionType import ActivationFunctionType
-            from tflite.Operator import Operator
             from tflite.Pool2DOptions import Pool2DOptions
             from tflite.Padding import Padding
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
         input_tensor = input_tensors[0]
@@ -1555,12 +1785,6 @@ class OperatorConverter(object):
 
     def convert_pad(self, op):
         """Convert TFLite PAD"""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
 
@@ -1606,7 +1830,6 @@ class OperatorConverter(object):
     def convert_mirror_pad(self, op):
         """Convert TFLite MIRROR_PAD"""
         try:
-            from tflite.Operator import Operator
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.MirrorPadOptions import MirrorPadOptions
         except ImportError:
@@ -1617,7 +1840,6 @@ class OperatorConverter(object):
             raise tvm.error.OpNotImplemented(
                 'TFlite quantized MIRROR_PAD operator is not supported yet.')
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
 
@@ -1645,12 +1867,10 @@ class OperatorConverter(object):
         """Convert TFLite pack"""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
-            from tflite.Operator import Operator
             from tflite.PackOptions import PackOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) >= 1, "input tensors should greater than 1"
         in_exprs = [self.get_expr(input_tensor.tensor_idx) for input_tensor in input_tensors]
@@ -1672,12 +1892,10 @@ class OperatorConverter(object):
         """Convert TFLite unpack"""
         try:
             from tflite.BuiltinOptions import BuiltinOptions
-            from tflite.Operator import Operator
             from tflite.UnpackOptions import UnpackOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 1, "input tensors length should be 1"
         input_tensor = input_tensors[0]
@@ -1714,12 +1932,7 @@ class OperatorConverter(object):
 
     def convert_batch_to_space_nd(self, op):
         """batch_to_space_nd implementation."""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 3, "input tensors length should be 3"
 
@@ -1767,12 +1980,6 @@ class OperatorConverter(object):
 
     def convert_space_to_batch_nd(self, op):
         """space_to_batch_nd implementation."""
-        try:
-            from tflite.Operator import Operator
-        except ImportError:
-            raise ImportError("The tflite package must be installed")
-
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 3, "input tensors length should be 3"
 
@@ -1822,14 +2029,54 @@ class OperatorConverter(object):
 
         return reshaped_permuted_reshaped_padded
 
-    def convert_prelu(self, op):
-        """Convert TFLite PReLU"""
+    def convert_depth_to_space(self, op):
+        """Convert TFLite DEPTH_TO_SPACE"""
         try:
-            from tflite.Operator import Operator
+            from tflite.BuiltinOptions import BuiltinOptions
+            from tflite.DepthToSpaceOptions import DepthToSpaceOptions
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+
+        input_tensor = input_tensors[0]
+        in_expr = self.get_expr(input_tensor.tensor_idx)
+
+        assert op.BuiltinOptionsType() == BuiltinOptions.DepthToSpaceOptions
+        op_options = op.BuiltinOptions()
+        depth_to_space_options = DepthToSpaceOptions()
+        depth_to_space_options.Init(op_options.Bytes, op_options.Pos)
+        block_size = depth_to_space_options.BlockSize()
+        out = _op.nn.depth_to_space(in_expr, block_size, layout='NHWC')
+
+        return out
+
+    def convert_space_to_depth(self, op):
+        """Convert TFLite SPACE_TO_DEPTH"""
+        try:
+            from tflite.BuiltinOptions import BuiltinOptions
+            from tflite.SpaceToDepthOptions import SpaceToDepthOptions
+        except ImportError:
+            raise ImportError("The tflite package must be installed")
+
+        input_tensors = self.get_input_tensors(op)
+        assert len(input_tensors) == 1, "input tensors length should be 1"
+
+        input_tensor = input_tensors[0]
+        in_expr = self.get_expr(input_tensor.tensor_idx)
+
+        assert op.BuiltinOptionsType() == BuiltinOptions.SpaceToDepthOptions
+        op_options = op.BuiltinOptions()
+        space_to_depth_options = SpaceToDepthOptions()
+        space_to_depth_options.Init(op_options.Bytes, op_options.Pos)
+        block_size = space_to_depth_options.BlockSize()
+        out = _op.nn.space_to_depth(in_expr, block_size, layout='NHWC')
+
+        return out
+
+    def convert_prelu(self, op):
+        """Convert TFLite PReLU"""
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 2, "input tensors length should be 2"
 
@@ -1849,13 +2096,11 @@ class OperatorConverter(object):
         try:
             from tflite.BuiltinOptions import BuiltinOptions
             from tflite.TensorType import TensorType
-            from tflite.Operator import Operator
             from tflite.TransposeConvOptions import TransposeConvOptions
             from tflite.Padding import Padding
         except ImportError:
             raise ImportError("The tflite package must be installed")
 
-        assert isinstance(op, Operator)
         input_tensors = self.get_input_tensors(op)
         assert len(input_tensors) == 3, "input tensors length should be 3"
 
@@ -2034,6 +2279,17 @@ class OperatorConverter(object):
 
     def has_expr(self, input_tensor_idx):
         return self.exp_tab.has_expr(get_tensor_name(self.subgraph, input_tensor_idx))
+
+
+def get_scalar_from_constant(expr):
+    """ Returns scalar value from Relay constant scalar. """
+    assert isinstance(expr, _expr.Constant) and not expr.data.shape, \
+        "Expr is not a constant scalar."
+    value = expr.data.asnumpy()
+    assert value.dtype == np.dtype(np.int32) or value.dtype == np.dtype(np.float32), \
+        "value must be float32/int32"
+    return np.asscalar(value)
+
 
 def build_str_map(obj):
     """Build string map of TFLite enum int value
@@ -2239,6 +2495,6 @@ def from_tflite(model, shape_dict, dtype_dict):
     params = {k:_nd.array(np.array(v)) for k, v in exp_tab.params.items()}
     outputs = [exp_tab.get_expr(get_tensor_name(subgraph, i)) for i in model_outputs]
     outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
-    func = _expr.Function(analysis.free_vars(outputs), outputs)
+    func = _function.Function(analysis.free_vars(outputs), outputs)
     mod = IRModule.from_expr(func)
     return mod, params

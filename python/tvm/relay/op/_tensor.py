@@ -19,17 +19,21 @@
 import topi
 
 from tvm.runtime import convert
+from tvm.te.hybrid import script
 from topi.util import get_const_tuple
 from .op import register_compute, register_shape_func
 from .op import register_broadcast_schedule, register_injective_schedule
 from .op import register_pattern, OpPattern
-from ...hybrid import script
 
 
 register_broadcast_schedule("log")
+register_broadcast_schedule("log2")
+register_broadcast_schedule("log10")
 register_broadcast_schedule("tan")
 register_broadcast_schedule("cos")
+register_broadcast_schedule("cosh")
 register_broadcast_schedule("sin")
+register_broadcast_schedule("sinh")
 register_broadcast_schedule("atan")
 register_broadcast_schedule("exp")
 register_broadcast_schedule("erf")
@@ -53,6 +57,7 @@ register_broadcast_schedule("copy")
 register_broadcast_schedule("logical_not")
 register_broadcast_schedule("logical_and")
 register_broadcast_schedule("logical_or")
+register_broadcast_schedule("logical_xor")
 register_broadcast_schedule("bitwise_not")
 register_broadcast_schedule("bitwise_and")
 register_broadcast_schedule("bitwise_or")
@@ -66,12 +71,18 @@ register_broadcast_schedule("less")
 register_broadcast_schedule("less_equal")
 register_broadcast_schedule("greater")
 register_broadcast_schedule("greater_equal")
+register_broadcast_schedule("isnan")
+register_broadcast_schedule("isfinite")
+register_broadcast_schedule("isinf")
 register_injective_schedule("maximum")
 register_injective_schedule("minimum")
 register_injective_schedule("right_shift")
 register_injective_schedule("left_shift")
 register_injective_schedule("shape_of")
 register_injective_schedule("ndarray_size")
+register_broadcast_schedule("fast_exp")
+register_broadcast_schedule("fast_tanh")
+register_broadcast_schedule("fast_erf")
 
 
 # zeros
@@ -199,6 +210,7 @@ register_shape_func("mod", False, broadcast_shape_func)
 register_shape_func("floor_mod", False, broadcast_shape_func)
 register_shape_func("logical_and", False, broadcast_shape_func)
 register_shape_func("logical_or", False, broadcast_shape_func)
+register_shape_func("logical_xor", False, broadcast_shape_func)
 register_shape_func("bitwise_not", False, broadcast_shape_func)
 register_shape_func("bitwise_and", False, broadcast_shape_func)
 register_shape_func("bitwise_or", False, broadcast_shape_func)
@@ -216,3 +228,6 @@ register_shape_func("sqrt", False, elemwise_shape_func)
 register_shape_func("negative", False, elemwise_shape_func)
 register_shape_func("exp", False, elemwise_shape_func)
 register_shape_func("tan", False, elemwise_shape_func)
+register_shape_func("fast_exp", False, elemwise_shape_func)
+register_shape_func("fast_tanh", False, elemwise_shape_func)
+register_shape_func("fast_erf", False, elemwise_shape_func)

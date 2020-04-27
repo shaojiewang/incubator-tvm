@@ -24,8 +24,11 @@
 #include <dmlc/thread_local.h>
 #include <tvm/driver/driver_api.h>
 #include <tvm/te/operation.h>
-#include <tvm/tir/ir_pass.h>
+
+#include <tvm/tir/transform.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/target/codegen.h>
+#include <tvm/runtime/container.h>
 #include <tvm/runtime/registry.h>
 
 #include <algorithm>
@@ -37,10 +40,9 @@ namespace tvm {
 using runtime::TVMArgs;
 using runtime::TVMRetValue;
 using runtime::PackedFunc;
-using tir::LoweredFunc;
 
 bool LLVMEnabled() {
-  const runtime::PackedFunc* pf = runtime::Registry::Get("codegen.build_llvm");
+  const runtime::PackedFunc* pf = runtime::Registry::Get("target.build.llvm");
   return pf != nullptr;
 }
 
@@ -106,178 +108,165 @@ void GetBinds(const Array<te::Tensor>& args,
   }
 }
 
-/*!
-* \brief Build a Stmt given a schedule, args and binds. This function runs the IR passes.
-* \param sch The schedule to build.
-* \param args The arguments for the schedule.
-* \param binds Buffer assignments.
-* \param loop_partition True if the LoopPartition pass should be included.
-* \param out_arg_list Returns the arguments for the Stmt.
-* \param config The build configuration.
-* \return The built Stmt.
-*/
-tir::Stmt BuildStmt(te::Schedule sch,
-                    const Array<te::Tensor>& args,
-                    const std::unordered_map<te::Tensor, tir::Buffer>& binds,
-                    bool loop_partition,
-                    Array<ObjectRef> *out_arg_list,
-                    const BuildConfig& config) {
+transform::Pass BindTarget(Target target) {
+  auto fpass = [target](tir::PrimFunc f, IRModule m, transform::PassContext ctx) {
+    return WithAttr(std::move(f), tvm::attr::kTarget, target);
+  };
+  return tir::transform::CreatePrimFuncPass(fpass, 0, "BindTarget", {});
+}
+
+
+template<typename FCond>
+transform::Pass Filter(FCond fcond) {
+  auto fpass = [fcond](tir::PrimFunc f, IRModule m, transform::PassContext ctx) {
+    if (fcond(f)) {
+      return f;
+    } else {
+      return tir::PrimFunc(nullptr);
+    }
+  };
+  return tir::transform::CreatePrimFuncPass(fpass, 0, "Filter", {});
+}
+
+
+IRModule lower(te::Schedule sch,
+               const Array<te::Tensor>& args,
+               const std::string& name,
+               const std::unordered_map<te::Tensor, tir::Buffer>& binds,
+               const BuildConfig& config) {
+  Array<ObjectRef> out_arg_list;
+
   sch = sch.normalize();
 
-  // Phase 0
+  // Before TIR transformation.
   auto bounds = te::InferBound(sch);
   auto stmt = te::ScheduleOps(sch, bounds, false);
-  stmt = tir::InjectPrefetch(stmt);
+  bool compact = te::VerifyCompactBuffer(stmt);
 
-  bool compact = tir::VerifyCompactBuffer(stmt);
   Map<te::Tensor, tir::Buffer> out_binds;
-  GetBinds(args, compact, binds, &out_binds, out_arg_list, config);
+  GetBinds(args, compact, binds, &out_binds, &out_arg_list, config);
 
+  // build the function
+  tir::PrimFunc f = te::SchedulePostProcToPrimFunc(
+      out_arg_list, std::move(stmt), out_binds);
+  f = WithAttr(std::move(f), "global_symbol", runtime::String(name));
+  if (config->restricted_func) {
+    f = WithAttr(std::move(f), "tir.noalias", Integer(1));
+  }
+
+  auto mod = IRModule(Map<GlobalVar, BaseFunc>({{GlobalVar(name), f}}));
+  auto pass_list = Array<tvm::transform::Pass>();
+
+  // Phase 0
+  pass_list.push_back(tir::transform::InjectPrefetch());
+  pass_list.push_back(
+      tir::transform::StorageFlatten(64, config->instrument_bound_checkers));
   // Phase 1
-  stmt = tir::StorageFlatten(stmt, out_binds, 64,
-                            config->instrument_bound_checkers);
-  stmt = tir::CanonicalSimplify(stmt);
-  if (loop_partition) {
-    stmt = tir::LoopPartition(stmt, config->partition_const_loop);
-  }
-  if (config->disable_vectorize) {
-    stmt = tir::SkipVectorize(stmt);
-  } else {
-    stmt = tir::VectorizeLoop(stmt);
-  }
-  stmt = tir::InjectVirtualThread(stmt);
-  stmt = tir::InjectDoubleBuffer(stmt, config->double_buffer_split_loop);
-  stmt = tir::StorageRewrite(stmt);
-  stmt = tir::UnrollLoop(stmt, config->auto_unroll_max_step, config->auto_unroll_max_depth,
-    config->auto_unroll_max_extent, config->unroll_explicit);
-
+  pass_list.push_back(tir::transform::NarrowDataType(32));
+  pass_list.push_back(tir::transform::Simplify());
+  pass_list.push_back(tir::transform::LoopPartition(config->partition_const_loop));
+  pass_list.push_back(tir::transform::VectorizeLoop(!config->disable_vectorize));
+  pass_list.push_back(tir::transform::InjectVirtualThread());
+  pass_list.push_back(tir::transform::InjectDoubleBuffer(config->double_buffer_split_loop));
+  pass_list.push_back(tir::transform::StorageRewrite());
+  pass_list.push_back(
+      tir::transform::UnrollLoop(config->auto_unroll_max_step,
+                                 config->auto_unroll_max_depth,
+                                 config->auto_unroll_max_extent,
+                                 config->unroll_explicit));
   // Phase 2
-  stmt = tir::Simplify(stmt);
-  stmt = tir::RemoveNoOp(stmt);
-
-  if (!(config->disable_select_rewriting))
-    stmt = tir::RewriteUnsafeSelect(stmt);
-
-  if (config->instrument_bound_checkers)
-    stmt = tir::InstrumentBoundCheckers(stmt);
-
-  return stmt;
+  pass_list.push_back(tir::transform::Simplify());
+  pass_list.push_back(tir::transform::RemoveNoOp());
+  if (!(config->disable_select_rewriting)) {
+    pass_list.push_back(tir::transform::RewriteUnsafeSelect());
+  }
+  if (config->instrument_bound_checkers) {
+    pass_list.push_back(tir::transform::InstrumentBoundCheckers());
+  }
+  // run
+  auto optimize = transform::Sequential(pass_list);
+  mod = optimize(std::move(mod));
+  return mod;
 }
 
-Array<LoweredFunc> lower(te::Schedule sch,
-                         const Array<te::Tensor>& args,
-                         const std::string& name,
-                         const std::unordered_map<te::Tensor, tir::Buffer>& binds,
-                         const BuildConfig& config) {
-  Array<ObjectRef> out_arg_list;
-  auto stmt = BuildStmt(sch, args, binds, true, &out_arg_list, config);
-  return Array<LoweredFunc>({ tir::MakeAPI(stmt, name, out_arg_list, 0, config->restricted_func) });
-}
 
-Array<Array<LoweredFunc> > split_dev_host_funcs(const Array<LoweredFunc>& funcs,
-                                                const Target& target,
-                                                const Target& target_host,
-                                                const BuildConfig& config) {
-  std::unordered_set<std::string> all_names;
-  for (const auto& x : funcs) {
-    CHECK(all_names.count(x->name) == 0)
-        << "Duplicate function name " << x->name;
-    all_names.insert(x->name);
+std::pair<IRModule, IRModule>
+split_dev_host_funcs(IRModule mod_mixed,
+                     const Target& target,
+                     const Target& target_host,
+                     const BuildConfig& config) {
+  Array<tvm::transform::Pass> mixed_pass_list = {
+    BindTarget(target),
+    tir::transform::VerifyMemory()
+  };
+  if (config->detect_global_barrier) {
+    mixed_pass_list.push_back(tir::transform::ThreadSync("global"));
   }
+  mixed_pass_list.push_back(tir::transform::ThreadSync("shared"));
+  mixed_pass_list.push_back(tir::transform::ThreadSync("warp"));
+  mixed_pass_list.push_back(tir::transform::InferFragment());
+  mixed_pass_list.push_back(tir::transform::LowerThreadAllreduce());
+  mixed_pass_list.push_back(tir::transform::MakePackedAPI(0));
+  mixed_pass_list.push_back(tir::transform::SplitHostDevice());
+  auto opt_mixed = transform::Sequential(mixed_pass_list);
+  mod_mixed = opt_mixed(std::move(mod_mixed));
 
-  Array<LoweredFunc> fhost;
-  Array<LoweredFunc> fdevice;
+  auto host_pass_list = {
+    Filter([](const tir::PrimFunc& f) {
+      return f->GetAttr<Integer>(
+          tvm::attr::kCallingConv,
+          Integer(CallingConv::kDefault)) != CallingConv::kDeviceKernelLaunch;
+    }),
+    BindTarget(target_host),
+    tir::transform::LowerTVMBuiltin(),
+    tir::transform::LowerIntrin(),
+    tir::transform::LowerDeviceStorageAccessInfo(),
+    tir::transform::CombineContextCall(),
+  };
+  auto opt_host = transform::Sequential(host_pass_list);
+  auto mhost = opt_host(mod_mixed);
 
-  for (const auto& x : funcs) {
-    CHECK(tir::VerifyMemory(x, target->device_type))
-        << "Direct host side access to device memory is detected in "
-        << x->func_name() << ". Did you forget to bind?";
+  // device pipeline
+  auto device_pass_list = {
+    Filter([](const tir::PrimFunc& f) {
+      return f->GetAttr<Integer>(
+          tvm::attr::kCallingConv,
+          Integer(CallingConv::kDefault)) == CallingConv::kDeviceKernelLaunch;
+    }),
+    BindTarget(target),
+    tir::transform::LowerWarpMemory(),
+    tir::transform::Simplify(),
+    tir::transform::LowerIntrin(),
+    tir::transform::LowerDeviceStorageAccessInfo(),
+  };
+  auto opt_device = transform::Sequential(device_pass_list);
+  auto mdevice = opt_device(mod_mixed);
 
-    if (x->func_type == tir::kMixedFunc) {
-      auto func = x;
-      if (config->detect_global_barrier) {
-        func = tir::ThreadSync(func, "global");
-      }
-
-      func = tir::ThreadSync(func, "shared");
-      func = tir::ThreadSync(func, "warp");
-      func = tir::LowerThreadAllreduce(func, target->thread_warp_size);
-      auto fsplits = tir::SplitHostDevice(func);
-      fhost.push_back(fsplits[0]);
-      for (auto f = fsplits.begin() + 1; f != fsplits.end(); ++f) {
-        fdevice.push_back(*f);
-      }
-    } else if (x->func_type == tir::kHostFunc) {
-      fhost.push_back(x);
-    } else if (x->func_type == tir::kDeviceFunc) {
-      fdevice.push_back(x);
-    } else {
-      LOG(FATAL) << "unknown function type " << x->func_type;
-    }
-  }
-
-  for (size_t i = 0; i < fdevice.size(); i++) {
-    auto warp_size = target->thread_warp_size;
-    auto func = fdevice[i];
-    func = tir::LowerWarpMemory(fdevice[i], warp_size);
-    fdevice.Set(i, func);
-  }
-
+  // some final misc checks.
   auto keys = target->keys();
   bool target_is_gpu = std::find(keys.begin(), keys.end(), "gpu") != keys.end();
-  if (target_is_gpu && fdevice.size() == 0) {
+  if (target_is_gpu && mdevice->functions.size() == 0) {
     LOG(WARNING) << "Specified target "
                  << target->str()
                  << " but cannot find device code. Did you forget to bind?";
   }
 
-  for (size_t i = 0; i < fdevice.size(); ++i) {
-    auto func = fdevice[i];
-    func = tir::LowerIntrin(func, target->target_name);
-    fdevice.Set(i, func);
-  }
-
   if (target->device_type == target::llvm()->device_type &&
-        target_host == target) {
-    CHECK(fdevice.empty()) << "No device code should be generated when target "
-                           << "and host_target are both llvm target."
-                           << "\n";
+      target_host == target) {
+    CHECK(mdevice->functions.empty())
+        << "No device code should be generated when target "
+        << "and host_target are both llvm target."
+        << "\n";
   }
 
-  for (size_t i = 0; i < fhost.size(); ++i) {
-    auto func = fhost[i];
-    func = tir::BindDeviceType(func, target->device_type);
-    func = tir::LowerDeviceStorageAccessInfo(func);
-    func = tir::LowerTVMBuiltin(func);
-    fhost.Set(i, func);
-  }
-
-  for (size_t i = 0; i < fhost.size(); ++i) {
-    auto func = fhost[i];
-    func = tir::LowerIntrin(func, target_host->target_name);
-    func = tir::LowerDeviceStorageAccessInfo(func);
-    func = tir::CombineContextCall(func);
-    fhost.Set(i, func);
-  }
-  return {fhost, fdevice};
+  return {mhost, mdevice};
 }
 
-// Create a module for a specific device (target). The lowered functions
-// associated with the host is returned as well.
-runtime::Module DeviceBuild(const Array<LoweredFunc>& fdevice,
-                            const Target& target) {
-  if (!fdevice.empty()) {
-    return codegen::Build(fdevice, target->str());
-  } else {
-    return runtime::Module(nullptr);
-  }
-}
 
 // Build for heterogeneous execution.
-runtime::Module build(const Map<Target, Array<LoweredFunc>>& inputs,
+runtime::Module build(const Map<Target, IRModule>& inputs,
                       const Target& target_host,
                       const BuildConfig& config) {
-  Array<LoweredFunc> fhost_all;
   std::vector<runtime::Module> device_modules;
 
   Target target_host_val = target_host;
@@ -294,20 +283,21 @@ runtime::Module build(const Map<Target, Array<LoweredFunc>>& inputs,
     target_host_val = DefaultTargetHost(target_host_val);
   }
 
+  IRModule mhost_all = IRModule(Map<GlobalVar, BaseFunc>());
+
   for (const auto& it : inputs) {
-    auto host_dev_funcs =
+    auto pair =
         split_dev_host_funcs(it.second, it.first, target_host_val, config);
-    auto& fhost = host_dev_funcs[0];
-    auto& fdevice = host_dev_funcs[1];
-    // Get the module for a certain target.
-    runtime::Module mdev = DeviceBuild(fdevice, it.first);
-    for (const auto& it : fhost) {
-      fhost_all.push_back(it);
+    auto& mhost = pair.first;
+    auto& mdevice = pair.second;
+
+    mhost_all->Update(mhost);
+    if (mdevice->functions.size() != 0) {
+      device_modules.push_back(codegen::Build(mdevice, it.first));
     }
-    device_modules.push_back(mdev);
   }
 
-  runtime::Module mhost = codegen::Build(fhost_all, target_host_val->str());
+  runtime::Module mhost = codegen::Build(mhost_all, target_host_val);
   // Import all modules
   for (const auto& it : device_modules) {
     if (it.operator->()) {
@@ -318,10 +308,10 @@ runtime::Module build(const Map<Target, Array<LoweredFunc>>& inputs,
 }
 
 // Build for heterogeneous execution when target is a string.
-runtime::Module build(const Map<std::string, Array<LoweredFunc>>& inputs,
+runtime::Module build(const Map<std::string, IRModule>& inputs,
                       const Target& target_host,
                       const BuildConfig& config) {
-  Map<Target, Array<LoweredFunc>> updated_input;
+  Map<Target, IRModule> updated_input;
   for (const auto& it : inputs) {
     auto target = Target::Create(it.first);
     if (target->device_name == "vta") {
@@ -333,11 +323,11 @@ runtime::Module build(const Map<std::string, Array<LoweredFunc>>& inputs,
 }
 
 // Build for homogeneous execution.
-runtime::Module build(const Array<LoweredFunc>& funcs,
+runtime::Module build(const IRModule& funcs,
                       const Target& target,
                       const Target& target_host,
                       const BuildConfig& config) {
-  Map<Target, Array<LoweredFunc>> inputs = {{target, funcs}};
+  Map<Target, IRModule> inputs = {{target, funcs}};
   return build(inputs, target_host, config);
 }
 

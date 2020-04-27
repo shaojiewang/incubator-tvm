@@ -23,10 +23,11 @@
 #include <tvm/te/schedule.h>
 #include <tvm/te/operation.h>
 #include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/ir_pass.h>
 #include <unordered_set>
 #include "message_passing.h"
-#include "../../tir/pass/ir_util.h"
+#include "operation_inline.h"
+
+#include "../../tir/transforms/ir_util.h"
 #include "../../arith/compute_expr.h"
 
 namespace tvm {
@@ -583,13 +584,13 @@ void InjectInline(ScheduleNode* sch) {
                   << "The Reduce inputs of ComputeOp should "
                   << "have the same attribute except value_index";
             }
-            PrimExpr new_value = tir::Inline(tir::EvaluateNode::make(new_body[j][0]),
+            PrimExpr new_value = Inline(tir::EvaluateNode::make(new_body[j][0]),
                                         stage->op, args, body).as<tir::EvaluateNode>()->value;
             if (!new_value.same_as(new_body[j][0])) {
               changed[j] = true;
               const tir::ReduceNode* r = new_value.as<tir::ReduceNode>();
-              CHECK_EQ(new_body[j].size(), r->source.size());
               CHECK(r != nullptr);
+              CHECK_EQ(new_body[j].size(), r->source.size());
               for (size_t k = 0; k < new_body[j].size(); ++k) {
                 auto n = make_object<tir::ReduceNode>(*r);
                 n->value_index = static_cast<int>(k);
@@ -599,7 +600,7 @@ void InjectInline(ScheduleNode* sch) {
             }
           } else {
             for (size_t k = 0; k < new_body[j].size(); ++k) {
-              PrimExpr new_value = tir::Inline(tir::EvaluateNode::make(new_body[j][k]),
+              PrimExpr new_value = Inline(tir::EvaluateNode::make(new_body[j][k]),
                                           stage->op, args, body).as<tir::EvaluateNode>()->value;
               if (!new_value.same_as(new_body[j][k])) {
                 new_body[j].Set(k, new_value);
@@ -611,7 +612,7 @@ void InjectInline(ScheduleNode* sch) {
           if (!new_hybrid_body[j].defined()) {
             new_hybrid_body[j] = hybrid->body;
           }
-          Stmt new_stmt = tir::Inline(new_hybrid_body[j], stage->op, args, body);
+          Stmt new_stmt = Inline(new_hybrid_body[j], stage->op, args, body);
           if (!new_stmt.same_as(new_hybrid_body[j])) {
             new_hybrid_body[j] = new_stmt;
             hybrid_changed[j] = true;

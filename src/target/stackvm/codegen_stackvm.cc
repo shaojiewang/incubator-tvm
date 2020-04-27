@@ -21,7 +21,10 @@
  * \file codegen_stackvm.cc
  */
 #include <tvm/runtime/registry.h>
+#include <tvm/runtime/container.h>
+#include <tvm/ir/module.h>
 #include <tvm/tir/op.h>
+#include <tvm/tir/function.h>
 #include <limits>
 #include <utility>
 #include "codegen_stackvm.h"
@@ -54,9 +57,11 @@ StackVM::StructFieldKind MapFieldKind(int64_t kind) {
   return StackVM::kArrData;
 }
 
-StackVM CodeGenStackVM::Compile(LoweredFunc f) {
-  for (size_t i = 0; i < f->args.size(); ++i) {
-    Var v = f->args[i];
+StackVM CodeGenStackVM::Compile(const PrimFunc& f) {
+  CHECK_EQ(f->buffer_map.size(), 0U)
+      << "Cannot codegen function with buffer_map, please lower them first";
+  for (size_t i = 0; i < f->params.size(); ++i) {
+    Var v = f->params[i];
     int vid = AllocVarID(v.get());
     CHECK_EQ(static_cast<size_t>(vid), i);
   }
@@ -151,16 +156,7 @@ void CodeGenStackVM::VisitStmt_(const StoreNode* op) {
 }
 
 void CodeGenStackVM::VisitStmt_(const AllocateNode* op) {
-  CHECK(!is_zero(op->condition));
-  int vid = AllocVarID(op->buffer_var.get());
-  if (op->new_expr.defined()) {
-    // Prefer global static allocation for the program
-    CHECK_EQ(op->free_function, "nop");
-    this->Push(op->new_expr);
-    this->PushOp(StackVM::STORE_HEAP, vid);
-  } else {
-    LOG(FATAL) << "Dynamic allocation not supported";
-  }
+  LOG(FATAL) << "Dynamic allocation not supported";
 }
 
 void CodeGenStackVM::VisitExpr_(const CallNode* op) {
@@ -405,10 +401,6 @@ void CodeGenStackVM::VisitExpr_(const NotNode* op) {
   this->PushOp(StackVM::NOT);
 }
 
-void CodeGenStackVM::VisitStmt_(const ProducerConsumerNode* op) {
-  this->Push(op->body);
-}
-
 void CodeGenStackVM::VisitStmt_(const ForNode* op) {
   CHECK(is_zero(op->min));
   int vid = this->AllocVarID(op->loop_var.get());
@@ -525,19 +517,32 @@ void CodeGenStackVM::VisitExpr_(const LetNode* op) {
   this->Push(op->body);
 }
 
-runtime::Module BuildStackVM(const Array<LoweredFunc>& funcs) {
-  CHECK_NE(funcs.size(), 0U);
+runtime::Module BuildStackVM(const IRModule& mod, const std::string& target) {
   std::unordered_map<std::string, StackVM> fmap;
-  for (LoweredFunc f : funcs) {
+  std::string entry_func;
+
+  for (auto kv :  mod->functions) {
+    CHECK(kv.second->IsInstance<PrimFuncNode>())
+        << "CodeGenStackVM: Can only take PrimFunc";
+    auto f = Downcast<PrimFunc>(kv.second);
+    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    CHECK(global_symbol.defined())
+        << "CodeGenStackVM: Expect PrimFunc to have the global_symbol attribute";
+    std::string f_name = global_symbol.value();
     StackVM vm = codegen::CodeGenStackVM().Compile(f);
-    CHECK(!fmap.count(f->name))
-        << "Function name " << f->name << "already exist in list";
-    fmap[f->name] = std::move(vm);
+    CHECK(!fmap.count(f_name))
+        << "Function name " << f_name << "already exist in list";
+    fmap[f_name] = std::move(vm);
+
+    if (f->HasNonzeroAttr(tir::attr::kIsEntryFunc)) {
+      entry_func = f_name;
+    }
   }
-  return runtime::StackVMModuleCreate(fmap, funcs[0]->name);
+
+  return runtime::StackVMModuleCreate(fmap, entry_func);
 }
 
-TVM_REGISTER_GLOBAL("codegen.build_stackvm")
+TVM_REGISTER_GLOBAL("target.build.stackvm")
 .set_body_typed(BuildStackVM);
 }  // namespace codegen
 }  // namespace tvm

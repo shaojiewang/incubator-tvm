@@ -26,6 +26,8 @@
 
 #include <tvm/relay/expr.h>
 #include <tvm/relay/op.h>
+#include <tvm/relay/function.h>
+#include <tvm/runtime/container.h>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -68,10 +70,9 @@ class CSourceModuleCodegenBase {
    */
   std::string GetExtSymbol(const Function& func) const {
     const auto name_node =
-      FunctionGetAttr(func, attr::kExternalSymbol).as<tvm::tir::StringImmNode>();
-    CHECK(name_node != nullptr) << "Fail to retrieve external symbol.";
-    std::string ext_symbol = name_node->value;
-    return ext_symbol;
+        func->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    CHECK(name_node.defined()) << "Fail to retrieve external symbol.";
+    return std::string(name_node.value());
   }
 };
 
@@ -164,44 +165,11 @@ class CodegenCBase {
   /*!
    * \brief Emit the code for external runtime.
    *
+   * \param out The outputs.
+   *
    * \return The code string.
    */
-  virtual std::string JIT() = 0;
-
-  /*!
-   * \brief Extract the shape from a Relay tensor type.
-   *
-   * \param type The provided type.
-   *
-   * \return The extracted shape in a list.
-   */
-  std::vector<int> GetShape(const Type& type) const {
-    const auto* ttype = type.as<TensorTypeNode>();
-    CHECK(ttype) << "Expect TensorTypeNode";
-    std::vector<int> shape;
-    for (size_t i = 0; i < ttype->shape.size(); ++i) {
-      auto* val = ttype->shape[i].as<IntImmNode>();
-      CHECK(val);
-      shape.push_back(val->value);
-    }
-    return shape;
-  }
-
-  /*!
-   * \brief Check if a call has the provided name.
-   *
-   * \param call A Relay call node.
-   * \param op_name The name of the expected call.
-   *
-   * \return true if the call's name is equivalent to the given name. Otherwise,
-   * false.
-   */
-  bool IsOp(const CallNode* call, std::string op_name) const {
-    const auto* op_node = call->op.as<OpNode>();
-    CHECK(op_node) << "Expects a single op.";
-    Op op = GetRef<Op>(op_node);
-    return op == Op::Get(op_name);
-  }
+  virtual std::string JIT(const std::vector<Output>& out) = 0;
 
   /*!
    * \brief A common interface that is used by various external runtime to
@@ -217,7 +185,7 @@ class CodegenCBase {
    *
    * \return The emitted code string.
    */
-  std::string JitImpl(std::string ext_func_id, const Array<Var>& args,
+  std::string JitImpl(const std::string& ext_func_id, const Array<Var>& args,
                       const std::vector<std::string>& buf_decl,
                       const std::vector<std::string>& body,
                       const std::vector<Output>& out) {

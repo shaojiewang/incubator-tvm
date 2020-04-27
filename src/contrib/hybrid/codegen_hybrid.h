@@ -27,7 +27,6 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/target/codegen.h>
-#include <tvm/tir/lowered_func.h>
 #include <tvm/te/schedule.h>
 #include <map>
 #include <string>
@@ -132,7 +131,6 @@ class CodeGenHybrid :
   void VisitStmt_(const AssertStmtNode* op) override;
   void VisitStmt_(const EvaluateNode* op) override;
   void VisitStmt_(const SeqStmtNode* op) override;
-  void VisitStmt_(const ProducerConsumerNode* op) override;
   /*!
    * \brief Print Type represetnation of type t.
    * \param t The type representation.

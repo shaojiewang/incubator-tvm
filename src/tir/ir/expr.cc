@@ -24,38 +24,65 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/op.h>
-#include <tvm/tir/ir_pass.h>
+#include <tvm/tir/stmt_functor.h>
 #include <memory>
 #include <limits>
-#include "../pass/ir_util.h"
+
+#include "../../support/str_escape.h"
 
 namespace tvm {
 namespace tir {
 
-Var::Var(std::string name_hint, DataType t)
-    : Var(make_object<VarNode>(t, name_hint)) {}
-
-VarNode::VarNode(DataType t, std::string name_hint) {
-  this->dtype = t;
-  this->name_hint = std::move(name_hint);
+Var::Var(std::string name_hint, DataType dtype) {
+  auto n = make_object<VarNode>();
+  n->name_hint = std::move(name_hint);
+  n->dtype = std::move(dtype);
+  data_ = std::move(n);
 }
 
-SizeVar::SizeVar(std::string name_hint, DataType t)
-    : SizeVar(make_object<SizeVarNode>(t, name_hint)) {}
+Var::Var(std::string name_hint, Type type_annotation) {
+  auto n = make_object<VarNode>();
+  n->name_hint = std::move(name_hint);
+  n->dtype = GetRuntimeDataType(type_annotation);
+  n->type_annotation = std::move(type_annotation);
+  data_ = std::move(n);
+}
 
-SizeVarNode::SizeVarNode(DataType t, std::string name_hint)
-    : VarNode(t, std::move(name_hint)) {}
+Var Var::copy_with_suffix(const std::string& suffix) const {
+  const VarNode* node = get();
+  ObjectPtr<VarNode> new_ptr;
+  if (auto* ptr = this->as<SizeVarNode>()) {
+    new_ptr = make_object<SizeVarNode>(*ptr);
+  } else {
+    new_ptr = make_object<VarNode>(*node);
+  }
+  new_ptr->name_hint += suffix;
+
+  return Var(new_ptr);
+}
+
+SizeVar::SizeVar(std::string name_hint, DataType dtype) {
+  auto n = make_object<SizeVarNode>();
+  n->name_hint = std::move(name_hint);
+  n->dtype = std::move(dtype);
+  data_ = std::move(n);
+}
 
 
 TVM_REGISTER_GLOBAL("tir.Var")
-.set_body_typed([](std::string s, DataType t) {
-    return Var(s, t);
-  });
+.set_body_typed([](std::string name_hint, runtime::TVMArgValue type) {
+  if (type.IsObjectRef<Type>()) {
+    return Var(name_hint, type.operator Type());
+  } else {
+    return Var(name_hint, type.operator DataType());
+  }
+});
 
 TVM_REGISTER_GLOBAL("tir.SizeVar")
 .set_body_typed([](std::string s, DataType t) {
     return SizeVar(s, t);
-  });
+});
+
 
 IterVar IterVarNode::make(Range dom,
                           Var var,
@@ -106,6 +133,7 @@ PrimExpr StringImmNode::make(std::string value) {
 TVM_REGISTER_GLOBAL("tir.StringImm")
 .set_body_typed(StringImmNode::make);
 
+
 PrimExpr CastNode::make(DataType t, PrimExpr value) {
   CHECK(value.defined());
   CHECK_EQ(t.lanes(), value.dtype().lanes());
@@ -114,6 +142,7 @@ PrimExpr CastNode::make(DataType t, PrimExpr value) {
   node->value = std::move(value);
   return PrimExpr(node);
 }
+
 
 PrimExpr AndNode::make(PrimExpr a, PrimExpr b) {
   CHECK(a.defined()) << "ValueError: a is undefined";
@@ -143,6 +172,7 @@ PrimExpr OrNode::make(PrimExpr a, PrimExpr b) {
   return PrimExpr(node);
 }
 
+
 PrimExpr NotNode::make(PrimExpr a) {
   CHECK(a.defined()) << "ValueError: a is undefined";
   CHECK(a.dtype().is_bool());
@@ -152,6 +182,8 @@ PrimExpr NotNode::make(PrimExpr a) {
   node->a = std::move(a);
   return PrimExpr(node);
 }
+
+
 
 PrimExpr SelectNode::make(PrimExpr condition, PrimExpr true_value, PrimExpr false_value) {
   CHECK(condition.defined()) << "ValueError: condition is undefined";
@@ -244,11 +276,11 @@ bool CallNode::is_vectorizable() const {
 }
 
 PrimExpr CallNode::make(DataType dtype,
-                std::string name,
-                Array<PrimExpr> args,
-                CallType call_type,
-                FunctionRef func,
-                int value_index) {
+                        std::string name,
+                        Array<PrimExpr> args,
+                        CallType call_type,
+                        FunctionRef func,
+                        int value_index) {
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i].defined());
   }
@@ -330,9 +362,11 @@ Array<PrimExpr> CommReducerNode::operator()(Array<PrimExpr> a, Array<PrimExpr> b
     value_map.Set(lhs[i], a[i]);
     value_map.Set(rhs[i], b[i]);
   }
-  return UpdateArray(result, [&value_map] (const PrimExpr& e) {
-      return Substitute(e, value_map);
-    });
+  auto ret = this->result;
+  ret.MutateByApply([&value_map] (const PrimExpr& e) {
+    return Substitute(e, value_map);
+  });
+  return ret;
 }
 
 TVM_REGISTER_GLOBAL("tir.CommReducer")
@@ -375,41 +409,27 @@ PrimExpr AnyNode::make() {
   return PrimExpr(n);
 }
 
+BufferLoad::BufferLoad(Buffer buffer, Array<PrimExpr> indices) {
+  ObjectPtr<BufferLoadNode> node = make_object<BufferLoadNode>();
+  node->dtype = buffer->dtype;
+  node->buffer = std::move(buffer);
+  node->indices = std::move(indices);
+  data_ = std::move(node);
+}
+
+TVM_REGISTER_GLOBAL("tir.BufferLoad")
+.set_body_typed([](Buffer buffer, Array<PrimExpr> indices) {
+  return BufferLoad(buffer, indices);
+});
+
+TVM_REGISTER_NODE_TYPE(BufferLoadNode);
+
+
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 .set_dispatch<StringImmNode>([](const ObjectRef& node, ReprPrinter* p) {
     auto* op = static_cast<const StringImmNode*>(node.get());
-    auto& stream = p->stream;
-    stream << '"';
-    for (size_t i = 0; i < op->value.size(); ++i) {
-      unsigned char c = op->value[i];
-      if (c >= ' ' && c <= '~' && c != '\\' && c != '"') {
-        stream << c;
-      } else {
-        stream << '\\';
-        switch (c) {
-          case '"':
-            stream << '"';
-            break;
-          case '\\':
-            stream << '\\';
-            break;
-          case '\t':
-            stream << 't';
-            break;
-          case '\r':
-            stream << 'r';
-            break;
-          case '\n':
-            stream << 'n';
-            break;
-          default:
-            const char* hex_digits = "0123456789ABCDEF";
-            stream << 'x' << hex_digits[c >> 4] << hex_digits[c & 0xf];
-        }
-      }
-    }
-    stream << '"';
-  });
+    p->stream << '\"' << support::StrEscape(op->value) << '\"';
+});
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 .set_dispatch<CastNode>([](const ObjectRef& node, ReprPrinter* p) {
@@ -628,6 +648,19 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
   });
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
+.set_dispatch<BufferLoadNode>([](const ObjectRef& node, ReprPrinter* p) {
+    auto* op = static_cast<const BufferLoadNode*>(node.get());
+    p->stream << op->buffer->name << "[";
+    for (size_t i = 0; i < op->indices.size(); ++i) {
+      p->Print(op->indices[i]);
+      if (i < op->indices.size() - 1) {
+        p->stream << ", ";
+      }
+    }
+    p->stream << "]";
+  });
+
+TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 .set_dispatch<LetNode>([](const ObjectRef& node, ReprPrinter* p) {
     auto* op = static_cast<const LetNode*>(node.get());
     p->stream << "(let " << op->var << " = ";
@@ -778,20 +811,28 @@ TVM_REGISTER_GLOBAL("tir.Load")
     }
   });
 
-
-
 TVM_REGISTER_GLOBAL("tir.Call")
 .set_body_typed([](
   DataType type, std::string name,
-  Array<PrimExpr> args, int call_type,
+  Array<ObjectRef> args, int call_type,
   FunctionRef func, int value_index
 ) {
+  Array<PrimExpr> prim_expr_args;
+  for (const auto& it : args) {
+    CHECK(it->IsInstance<runtime::StringObj>() ||
+          it->IsInstance<PrimExprNode>());
+    if (const auto* str = it.as<runtime::StringObj>()) {
+      prim_expr_args.push_back(StringImmNode::make(str->data));
+    } else {
+      prim_expr_args.push_back(Downcast<PrimExpr>(it));
+    }
+  }
   return CallNode::make(type,
-                    name,
-                    args,
-                    static_cast<CallNode::CallType>(call_type),
-                    func,
-                    value_index);
+                        name,
+                        prim_expr_args,
+                        static_cast<CallNode::CallType>(call_type),
+                        func,
+                        value_index);
 });
 
 }  // namespace tir

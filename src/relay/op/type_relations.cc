@@ -22,9 +22,10 @@
  * \brief A set of utilities and common functionality
  * for type relations.
  */
+#include <tvm/arith/analyzer.h>
+#include <tvm/tir/op.h>
 #include <tvm/relay/expr.h>
 #include <tvm/relay/op.h>
-#include <tvm/tir/ir_pass.h>
 #include <numeric>
 #include "./type_relations.h"
 
@@ -48,7 +49,8 @@ bool EqualCheck(const IndexExpr& lhs,
     return pdiff[0] == 0;
   }
   // symbolic
-  diff = tvm::tir::CanonicalSimplify(diff);
+  tvm::arith::Analyzer ana;
+  diff = ana.Simplify(diff);
   if (const int64_t* pdiff = tir::as_const_int(diff)) {
     return pdiff[0] == 0;
   }
@@ -132,6 +134,18 @@ bool BroadcastCompRel(const Array<Type>& types,
         ConcreteBroadcast(GetRef<TensorType>(t0), GetRef<TensorType>(t1), DataType::Bool()));
       return true;
     }
+  }
+  return false;
+}
+
+bool IdentityCompRel(const Array<Type>& types,
+                     int num_inputs,
+                     const Attrs& attrs,
+                     const TypeReporter& reporter) {
+  if (auto* t0 = types[0].as<TensorTypeNode>()) {
+    Type out_type = TensorType(GetRef<TensorType>(t0)->shape, DataType::Bool());
+    reporter->Assign(types[1], out_type);
+    return true;
   }
   return false;
 }

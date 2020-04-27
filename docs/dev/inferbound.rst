@@ -15,9 +15,12 @@
     specific language governing permissions and limitations
     under the License.
 
+.. _dev-InferBound-Pass:
+
 *******************************************
 InferBound Pass
 *******************************************
+
 
 The InferBound pass is run after normalize, and before ScheduleOps `build_module.py <https://github.com/apache/incubator-tvm/blob/master/python/tvm/build_module.py>`_. The main job of InferBound is to create the bounds map, which specifies a Range for each IterVar in the program. These bounds are then passed to ScheduleOps, where they are used to set the extents of For loops, see `MakeLoopNest <https://github.com/apache/incubator-tvm/blob/master/src/op/op_util.cc>`_, and to set the sizes of allocated buffers (`BuildRealize <https://github.com/apache/incubator-tvm/blob/master/src/op/compute_op.cc>`_), among other uses.
 
@@ -83,14 +86,14 @@ A TVM schedule is composed of Stages. Each stage has exactly one Operation, e.g.
    		Array<IterVarRelation> relations;
    		// remainder omitted
    	};
-   	
+
    	class OperationNode : public Node {
    	public:
    		virtual Array<IterVar> root_iter_vars();
    		virtual Array<Tensor> InputTensors();
    		// remainder omitted
    	};
-   	
+
    	class ComputeOpNode : public OperationNode {
    	public:
    		Array<IterVar> axis;
@@ -623,15 +626,16 @@ Above, we discussed the behavior of PassUpDomain on Split relations only. In the
 ::
 
    import tvm
+   from tvm import te
 
    n = 4
    m = 4
 
-   A = tvm.placeholder((n, m), name='A')
-   B = tvm.compute((n, m), lambda bi, bj: A[bi, bj]+2, name='B')
-   C = tvm.compute((n, m), lambda ci, cj: B[ci, cj]*3, name='C')
+   A = te.placeholder((n, m), name='A')
+   B = te.compute((n, m), lambda bi, bj: A[bi, bj]+2, name='B')
+   C = te.compute((n, m), lambda ci, cj: B[ci, cj]*3, name='C')
 
-   s = tvm.create_schedule(C.op)
+   s = te.create_schedule(C.op)
 
    fused_axes = s[C].fuse(C.op.axis[0], C.op.axis[1])
    xo, xi = s[C].split(fused_axes, 4)

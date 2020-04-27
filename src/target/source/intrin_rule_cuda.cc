@@ -29,14 +29,12 @@ namespace intrin {
 // Add float suffix to the intrinsics, CUDA fast math.
 struct CUDAMath {
   std::string operator()(DataType t, std::string name) const {
-    if (t.lanes() == 1) {
-      if (t.is_float()) {
-        switch (t.bits()) {
-          case 64: return name;
-          case 32: return name + 'f';
-          case 16: return 'h' + name;
-          default: return "";
-        }
+    if (t.is_float()) {
+      switch (t.bits()) {
+        case 64: return name;
+        case 32: return name + 'f';
+        case 16: return 'h' + name;
+        default: return "";
       }
     }
     return "";
@@ -45,7 +43,7 @@ struct CUDAMath {
 
 struct CUDAFastMath : public CUDAMath {
   std::string operator()(DataType t, std::string name) const {
-    if (t.lanes() == 1 && t.is_float() && t.bits() == 32) {
+    if (t.is_float() && t.bits() == 32) {
       return "__" + name + 'f';
     } else {
       return CUDAMath::operator()(t, name);
@@ -56,7 +54,7 @@ struct CUDAFastMath : public CUDAMath {
 
 struct CUDAFastMathTan : public CUDAMath {
   std::string operator()(DataType t, std::string name) const {
-    if (t.lanes() == 1 && t.is_float()) {
+    if (t.is_float()) {
         switch (t.bits()) {
           case 64: return name;
           // `__tanf` seems to produce some values too deviant from numpy tan version.
@@ -72,7 +70,7 @@ struct CUDAFastMathTan : public CUDAMath {
 
 struct CUDAPopcount {
   std::string operator()(DataType t, std::string name) const {
-    if (t.lanes() == 1 && t.is_uint()) {
+    if (t.is_uint()) {
       switch (t.bits()) {
         case 32: return "__popc";
         case 64: return "__popcll";
@@ -83,11 +81,15 @@ struct CUDAPopcount {
   }
 };
 
-struct CUDAShuffle {
-  std::string operator()(DataType t, std::string name) const {
-    return "__shfl";
-  }
-};
+static void DispatchCUDAShuffle(const TVMArgs& args, TVMRetValue* rv) {
+  PrimExpr e = args[0];
+  const CallNode* call = e.as<CallNode>();
+  CHECK(call != nullptr);
+  CHECK_EQ(call->args.size(), 4);  // value, warp_id, width, warp_size
+  Array<PrimExpr> cuda_args{{call->args[0], call->args[1], call->args[2]}};
+  *rv = CallNode::make(
+      call->dtype, "__shfl", cuda_args, CallNode::PureExtern);
+}
 
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.floor")
 .set_body(DispatchExtern<CUDAMath>);
@@ -107,10 +109,22 @@ TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.round")
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.exp")
 .set_body(DispatchExtern<CUDAFastMath>);
 
+TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.exp2")
+.set_body(DispatchExtern<CUDAMath>);
+
+TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.exp10")
+.set_body(DispatchExtern<CUDAFastMath>);
+
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.erf")
 .set_body(DispatchExtern<CUDAMath>);
 
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.log")
+.set_body(DispatchExtern<CUDAFastMath>);
+
+TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.log2")
+.set_body(DispatchExtern<CUDAFastMath>);
+
+TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.log10")
 .set_body(DispatchExtern<CUDAFastMath>);
 
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.tan")
@@ -119,8 +133,14 @@ TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.tan")
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.cos")
 .set_body(DispatchExtern<CUDAFastMath>);
 
+TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.cosh")
+.set_body(DispatchExtern<CUDAMath>);
+
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.sin")
 .set_body(DispatchExtern<CUDAFastMath>);
+
+TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.sinh")
+.set_body(DispatchExtern<CUDAMath>);
 
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.atan")
 .set_body(DispatchExtern<CUDAMath>);
@@ -138,7 +158,7 @@ TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.popcount")
 .set_body(DispatchExtern<CUDAPopcount>);
 
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.tvm_warp_shuffle")
-.set_body(DispatchExtern<CUDAShuffle>);
+.set_body(DispatchCUDAShuffle);
 
 TVM_REGISTER_GLOBAL("tvm.intrin.rule.cuda.fmod")
 .set_body(DispatchExtern<CUDAMath>);

@@ -330,6 +330,38 @@ def exp(x):
     return call_pure_intrin(x.dtype, "exp", x)
 
 
+def exp2(x):
+    """Calculate 2**x
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x.dtype, "exp2", x)
+
+
+def exp10(x):
+    """Calculate 10**x
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x.dtype, "exp10", x)
+
+
 def erf(x):
     """Take gauss error function of the input x.
 
@@ -393,6 +425,55 @@ def log(x):
     """
     return call_pure_intrin(x.dtype, "log", x)
 
+
+def log2(x):
+    """Take log2 of input x.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x.dtype, "log2", x)
+
+
+def log10(x):
+    """Take log10 of input x.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x.dtype, "log10", x)
+
+
+def log1p(x):
+    """Take log(x + 1) with respect to input x.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x.dtype, "log1p", x)
+
+
 def tan(x):
     """Take tan of input x.
 
@@ -424,6 +505,23 @@ def cos(x):
     """
     return call_pure_intrin(x.dtype, "cos", x)
 
+
+def cosh(x):
+    """Take cosh of input x.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x.dtype, "cosh", x)
+
+
 def sin(x):
     """Take sin of input x.
 
@@ -439,6 +537,23 @@ def sin(x):
     """
     return call_pure_intrin(x.dtype, "sin", x)
 
+
+def sinh(x):
+    """Take sinh of input x.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x.dtype, "sinh", x)
+
+
 def atan(x):
     """Take atan of input x.
 
@@ -453,6 +568,26 @@ def atan(x):
         The result.
     """
     return call_pure_intrin(x.dtype, "atan", x)
+
+
+def atan2(x1, x2):
+    """Take arctan2(x1, x2).
+
+    Parameters
+    ----------
+    x1 : PrimExpr
+        Input argument.
+
+    x2 : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x1.dtype, "atan2", x1, x2)
+
 
 def sqrt(x):
     """Take square root of input x.
@@ -592,6 +727,82 @@ def nearbyint(x):
     return _ffi_api.nearbyint(x)
 
 
+def nextafter(x1, x2):
+    """Return the next floating-point value after x1 towards x2.
+
+    Parameters
+    ----------
+    x1 : PrimExpr
+        Input argument.
+
+    x2 : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x1.dtype, "nextafter", x1, x2)
+
+
+def hypot(x1, x2):
+    """Equivalent to sqrt(x1**2 + x2**2), element-wise.
+
+    Parameters
+    ----------
+    x1 : PrimExpr
+        Input argument.
+
+    x2 : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x1.dtype, "hypot", x1, x2)
+
+
+def copysign(x1, x2):
+    """Change the sign of x1 to that of x2, element-wise.
+
+    Parameters
+    ----------
+    x1 : PrimExpr
+        Input argument.
+
+    x2 : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x1.dtype, "copysign", x1, x2)
+
+
+def ldexp(x1, x2):
+    """Returns x1 * (2 ** x2).
+
+    Parameters
+    ----------
+    x1 : PrimExpr
+        Input argument.
+
+    x2 : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return call_pure_intrin(x1.dtype, "ldexp", x1, x2)
+
+
 def isnan(x):
     """Check if input value is Nan.
 
@@ -606,6 +817,38 @@ def isnan(x):
         The result.
     """
     return _ffi_api.isnan(x)
+
+
+def isfinite(x):
+    """Check if input value is finite.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return _ffi_api.isfinite(x)
+
+
+def isinf(x):
+    """Check if input value is infinite.
+
+    Parameters
+    ----------
+    x : PrimExpr
+        Input argument.
+
+    Returns
+    -------
+    y : PrimExpr
+        The result.
+    """
+    return _ffi_api.isinf(x)
 
 
 def power(x, y):

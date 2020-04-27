@@ -144,6 +144,23 @@ def cos(x):
 
 
 @tvm.te.tag_scope(tag=tag.ELEMWISE)
+def cosh(x):
+    """Take cosh of input x.
+
+    Parameters
+    ----------
+    x : tvm.te.Tensor
+        Input argument.
+
+    Returns
+    -------
+    y : tvm.te.Tensor
+        The result.
+    """
+    return te.compute(x.shape, lambda *i: te.cosh(x(*i)))
+
+
+@tvm.te.tag_scope(tag=tag.ELEMWISE)
 def sin(x):
     """Take sin of input x.
 
@@ -158,6 +175,23 @@ def sin(x):
         The result.
     """
     return te.compute(x.shape, lambda *i: te.sin(x(*i)))
+
+
+@tvm.te.tag_scope(tag=tag.ELEMWISE)
+def sinh(x):
+    """Take sinh of input x.
+
+    Parameters
+    ----------
+    x : tvm.te.Tensor
+        Input argument.
+
+    Returns
+    -------
+    y : tvm.te.Tensor
+        The result.
+    """
+    return te.compute(x.shape, lambda *i: te.sinh(x(*i)))
 
 
 @tvm.te.tag_scope(tag=tag.ELEMWISE)
@@ -278,6 +312,40 @@ def isnan(x):
 
 
 @tvm.te.tag_scope(tag=tag.ELEMWISE)
+def isfinite(x):
+    """Check if value of x is finite, element-wise.
+
+    Parameters
+    ----------
+    x : tvm.Tensor
+        Input argument.
+
+    Returns
+    -------
+    y : tvm.Tensor
+        The result.
+    """
+    return te.compute(x.shape, lambda *i: te.isfinite(x(*i)))
+
+
+@tvm.te.tag_scope(tag=tag.ELEMWISE)
+def isinf(x):
+    """Check if value of x is infinite, element-wise.
+
+    Parameters
+    ----------
+    x : tvm.Tensor
+        Input argument.
+
+    Returns
+    -------
+    y : tvm.Tensor
+        The result.
+    """
+    return te.compute(x.shape, lambda *i: te.isinf(x(*i)))
+
+
+@tvm.te.tag_scope(tag=tag.ELEMWISE)
 def round(x):
     """Round elements of x to nearest integer.
 
@@ -309,6 +377,40 @@ def log(x):
         The result.
     """
     return te.compute(x.shape, lambda *i: te.log(x(*i)))
+
+
+@tvm.te.tag_scope(tag=tag.ELEMWISE)
+def log2(x):
+    """Take logarithm to the base 2 of input x.
+
+    Parameters
+    ----------
+    x : tvm.te.Tensor
+        Input argument.
+
+    Returns
+    -------
+    y : tvm.te.Tensor
+        The result.
+    """
+    return te.compute(x.shape, lambda *i: te.log2(x(*i)))
+
+
+@tvm.te.tag_scope(tag=tag.ELEMWISE)
+def log10(x):
+    """Take logarithm to the base 10 of input x.
+
+    Parameters
+    ----------
+    x : tvm.te.Tensor
+        Input argument.
+
+    Returns
+    -------
+    y : tvm.te.Tensor
+        The result.
+    """
+    return te.compute(x.shape, lambda *i: te.log10(x(*i)))
 
 
 @tvm.te.tag_scope(tag=tag.ELEMWISE)
@@ -500,3 +602,19 @@ def fast_tanh(x):
         The result.
     """
     return cpp.fast_tanh(x, x.dtype, tag.ELEMWISE)
+
+
+def fast_erf(x):
+    """Take gauss error function of input x using fast_erf implementation.
+
+    Parameters
+    ----------
+    x : tvm.te.Tensor
+        Input argument.
+
+    Returns
+    -------
+    y : tvm.te.Tensor
+        The result.
+    """
+    return cpp.fast_erf(x, x.dtype, tag.ELEMWISE)

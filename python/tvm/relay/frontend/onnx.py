@@ -24,6 +24,7 @@ from tvm.ir import IRModule
 from ... import nd as _nd
 from .. import analysis
 from .. import expr as _expr
+from .. import function as _function
 from .. import op as _op
 from .common import AttrCvt, Renamer
 from .common import get_relay_op, new_var, infer_shape, infer_channels
@@ -56,8 +57,7 @@ class onnx_input():
         if isinstance(item, int):
             self.input_dict[self.input_keys[item]] = value
         elif isinstance(item, str):
-            if item not in self.input_dict:
-                self.input_keys.append(item)
+            self.input_keys.append(item)
             self.input_dict[item] = value
         else:
             raise ValueError("Only integer and string indexed writes allowed.")
@@ -91,16 +91,18 @@ def get_numpy(tensor_proto):
     return to_array(tensor_proto)
 
 
-def dimension_picker(prefix, surfix=''):
+def dimension_picker(prefix, suffix=''):
     """Check that dimensions are supported."""
     def _impl(attr):
         kernel = attr['kernel_shape']
         if len(kernel) == 1:
-            return prefix + '1d' + surfix
+            return prefix + '1d' + suffix
         if len(kernel) == 2:
-            return prefix + '2d' + surfix
-        msg = 'Only 1D and 2D kernels are supported for operator {}.'
-        op_name = prefix + '1d/2d'
+            return prefix + '2d' + suffix
+        if len(kernel) == 3:
+            return prefix + '3d' + suffix
+        msg = 'Only 1D, 2D, and 3D kernels are supported for operator {}.'
+        op_name = prefix + '1d/2d/3d'
         raise tvm.error.OpAttributeInvalid(msg.format(op_name))
 
     return _impl
@@ -134,8 +136,10 @@ def onnx_default_layout(dims):
         return 'NCW'
     if dims == 2:
         return 'NCHW'
+    if dims == 3:
+        return 'NCDHW'
 
-    msg = "Only 1d and 2d layouts are currently supported"
+    msg = "Only 1D, 2D and 3D layouts are currently supported"
     raise tvm.error.OpAttributeInvalid(msg.format(op_name))
 
 
@@ -148,18 +152,20 @@ def onnx_storage_order2layout(storage_order, dims=2):
         return 'NCW' if storage_order == 0 else 'NWC'
     if dims == 2:
         return 'NCHW' if storage_order == 0 else 'NHWC'
+    if dims == 3:
+        return 'NCDHW' if storage_order == 0 else 'NDHWC'
 
-    msg = "Only 1d and 2d layouts are currently supported"
+    msg = "Only 1D, 2D and 3D layouts are currently supported"
     raise tvm.error.OpAttributeInvalid(msg.format(op_name))
 
 
 def dimension_constraint():
     def _dim_check(attrs):
-        if len(attrs['kernel_shape']) == 2 or len(attrs['kernel_shape']) == 1:
+        if len(attrs['kernel_shape']) in [1, 2, 3]:
             return True
         return False
 
-    return _dim_check, "Only 1d and 2d kernel supported."
+    return _dim_check, "Only 1d, 2d and 3d kernel supported."
 
 
 class OnnxOpConverter(object):
@@ -777,19 +783,31 @@ class Upsample(OnnxOpConverter):
             assert len(inputs) == 2, "Upsample op take 2 inputs, {} given".format(len(inputs))
             scales = params[inputs[1].name_hint].asnumpy()
             inputs = inputs[:1]
-        assert len(scales) == 4 and scales[0] == 1.0 and scales[1] == 1.0
+        assert scales[0] == 1.0 and scales[1] == 1.0
+        input_shape = infer_shape(inputs[0])
+        dims = len(input_shape)
         mode = attr.get('mode')
         if mode == b'nearest':
             method = "nearest_neighbor"
         elif mode == b'linear':
-            method = "bilinear"
+            method = "trilinear" if dims == 5 else "bilinear"
         else:
             raise tvm.error.OpAttributeInvalid(
                 'Value {} in attribute "mode" of operator Upsample is not valid.'.format(mode))
-        attr = {'scale_h': scales[-2], 'scale_w': scales[-1], 'method': method,
-                'layout': 'NCHW', 'align_corners': True}
-        return AttrCvt('upsampling')(inputs, attr)
-
+        attr = {'scale_h': scales[-2],
+                'scale_w': scales[-1],
+                'method': method}
+        if dims == 5:
+            assert len(scales) == 5
+            attr['scale_d'] = scales[-3]
+            attr['layout'] = 'NCDHW'
+            op_name = 'upsampling3d'
+        else:
+            assert len(scales) == 4
+            attr['layout'] = 'NCHW'
+            attr['align_corners'] = True
+            op_name = 'upsampling'
+        return AttrCvt(op_name)(inputs, attr)
 
 class Shape(OnnxOpConverter):
     """ Operator converter for Shape.
@@ -1441,6 +1459,34 @@ class Resize(OnnxOpConverter):
         return _op.image.resize(inputs[0], out_size, layout, method, coord_trans)
 
 
+class NonZero(OnnxOpConverter):
+    """Operator converter for NonZero
+    """
+    @classmethod
+    def _impl_v9(cls, inputs, attr, params):
+        if len(inputs) > 1:
+            raise ValueError("Expect 1 input only")
+
+        output = AttrCvt(op_name='argwhere')(inputs, attr, params)
+        return _op.transpose(output, axes=(1, 0))
+
+class TopK(OnnxOpConverter):
+    """Operator converter for TopK
+    """
+    @classmethod
+    def _impl_v1(cls, inputs, attr, params):
+        if len(inputs) != 2:
+            raise ValueError("Expect 2 input only")
+        axis = attr.get("axis", -1)
+        largest = attr.get("largest", 1)
+
+        if largest == 0:
+            raise ValueError("TVM only supports finding TopK largest elements")
+
+        K = int(infer_value(inputs[1], params).asnumpy()[0])
+
+        return _op.topk(inputs[0], k=K, axis=axis)
+
 # compatible operators that do NOT require any conversion.
 _identity_list = []
 
@@ -1543,8 +1589,11 @@ def _get_convert_map(opset):
         'ReduceProd': ReduceProd.get_converter(opset),
         # 'ReduceProd'
         # 'ReduceLogSumExp'
+
+        #defs/sorting
         'ArgMax': ArgMax.get_converter(opset),
         'ArgMin': ArgMin.get_converter(opset),
+        'TopK': TopK.get_converter(opset),
 
         # defs/tensor
         'Cast': Cast.get_converter(opset),
@@ -1570,6 +1619,7 @@ def _get_convert_map(opset):
         'Where': Where.get_converter(opset),
         'Or': Or.get_converter(opset),
         'Resize': Resize.get_converter(opset),
+        'NonZero': NonZero.get_converter(opset),
     }
 
 
@@ -1706,7 +1756,7 @@ class GraphProto(object):
         # now return the outputs
         outputs = [self._nodes[self._parse_value_proto(i)] for i in graph.output]
         outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
-        func = _expr.Function(analysis.free_vars(outputs), outputs)
+        func = _function.Function(analysis.free_vars(outputs), outputs)
         return IRModule.from_expr(func), self._params
 
     def _parse_value_proto(self, value_proto):
@@ -1772,7 +1822,7 @@ class GraphProto(object):
         ----------
         op_name : str
             Operator name, such as Convolution, FullyConnected
-        inputs : list of tvm.relay.expr.Function
+        inputs : list of tvm.relay.function.Function
             List of inputs.
         attrs : dict
             Dict of operator attributes
@@ -1781,7 +1831,7 @@ class GraphProto(object):
 
         Returns
         -------
-        sym : tvm.relay.expr.Function
+        sym : tvm.relay.function.Function
             Converted relay function
         """
         convert_map = _get_convert_map(opset)

@@ -208,6 +208,10 @@ NDArray NDArray::FromDLPack(DLManagedTensor* tensor) {
   // fill up content.
   data->manager_ctx = tensor;
   data->dl_tensor = tensor->dl_tensor;
+  // update shape_
+  data->shape_.resize(data->dl_tensor.ndim);
+  data->shape_.assign(data->dl_tensor.shape, data->dl_tensor.shape + data->dl_tensor.ndim);
+  data->dl_tensor.shape = data->shape_.data();
   return NDArray(GetObjectPtr<Object>(data));
 }
 
@@ -233,7 +237,9 @@ void NDArray::CopyFromTo(const DLTensor* from,
 
   CHECK(from->ctx.device_type == to->ctx.device_type
         || from->ctx.device_type == kDLCPU
-        || to->ctx.device_type == kDLCPU)
+        || to->ctx.device_type == kDLCPU
+        || from->ctx.device_type == kDLCPUPinned
+        || to->ctx.device_type == kDLCPUPinned)
     << "Can not copy across different ctx types directly";
 
   // Use the context that is *not* a cpu context to get the correct device

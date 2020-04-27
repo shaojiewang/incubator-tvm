@@ -30,21 +30,38 @@ from tvm.relay.testing.config import ctx_list
 import scipy
 
 
-def get_tvm_output(graph_def, input_data, target, ctx, output_shape=None, output_dtype='float32', opset=None):
-    """ Generic function to execute and get tvm output"""
-    target = 'llvm'
+def get_input_data_shape_dict(graph_def, input_data):
     if isinstance(input_data, list):
         input_names = {}
         shape_dict = {}
-        dtype_dict = {}
         for i, _ in enumerate(input_data):
             input_names[i] = graph_def.graph.input[i].name
             shape_dict[input_names[i]] = input_data[i].shape
-            dtype_dict[input_names[i]] = input_data[i].dtype
     else:
         input_names = graph_def.graph.input[0].name
         shape_dict = {input_names: input_data.shape}
-        dtype_dict = {input_names: input_data.dtype}
+
+    return input_names, shape_dict
+
+
+def get_tvm_output_with_vm(graph_def, input_data, target, ctx, opset=None):
+    """ Generic function to execute and get tvm output with vm executor"""
+
+    _, shape_dict = get_input_data_shape_dict(graph_def, input_data)
+
+    mod, params = relay.frontend.from_onnx(graph_def, shape_dict, opset=opset)
+
+    ex = relay.create_executor('vm', mod=mod, ctx=ctx, target=target)
+    indata = tvm.nd.array(input_data)
+    result = ex.evaluate()(indata)
+    return result.asnumpy()
+
+
+def get_tvm_output(graph_def, input_data, target, ctx, output_shape=None, output_dtype='float32', opset=None):
+    """ Generic function to execute and get tvm output"""
+    target = 'llvm'
+
+    input_names, shape_dict = get_input_data_shape_dict(graph_def, input_data)
 
     mod, params = relay.frontend.from_onnx(graph_def, shape_dict, opset=opset)
     with relay.build_config(opt_level=1):
@@ -724,6 +741,30 @@ def _test_upsample_nearest():
         tvm.testing.assert_allclose(out_array, tvm_out)
 
 
+def _test_upsample3d_nearest():
+    scale = 2
+    in_shape = (1, 1, 3, 3, 3)
+    out_shape = (1, 1, 3*scale, 3*scale, 3*scale)
+    y = helper.make_node("Upsample", ['in'], [
+                         'out'], mode='nearest', scales=[1.0, 1.0, 2.0, 2.0, 2.0])
+
+    in_array = np.random.uniform(size=in_shape).astype(np.float32)
+    out_array = topi.testing.upsampling3d_python(
+        in_array, (scale, scale, scale), "NCDHW")
+
+    graph = helper.make_graph([y],
+                              'upsample_nearest_test',
+                              inputs=[helper.make_tensor_value_info(
+                                  "in", TensorProto.FLOAT, list(in_shape))],
+                              outputs=[helper.make_tensor_value_info("out", TensorProto.FLOAT, list(out_shape))])
+
+    model = helper.make_model(graph, producer_name='upsample_nearest_test')
+
+    for target, ctx in ctx_list():
+        tvm_out = get_tvm_output(
+            model, in_array, target, ctx, out_shape, 'float32')
+        tvm.testing.assert_allclose(out_array, tvm_out)
+
 def _test_upsample_bilinear():
     scale = 2
     in_shape = (1, 1, 3, 3)
@@ -783,11 +824,45 @@ def _test_upsample_bilinear_opset9():
         tvm.testing.assert_allclose(out_array, tvm_out, rtol=1e-5, atol=1e-5)
 
 
+def _test_upsample3d_trilinear():
+    scale = 2
+    in_shape = (1, 1, 3, 3, 3)
+    out_shape = (1, 1, 3*scale, 3*scale, 3*scale)
+    y = helper.make_node("Upsample", ['in', 'scales'], ['out'], mode='linear')
+    scales = [1.0, 1.0, 2.0, 2.0, 2.0]
+    in_array = np.random.uniform(size=in_shape).astype(np.float32)
+    out_array = topi.testing.trilinear_resize3d_python(
+        in_array, (3*scale, 3*scale, 3*scale), "NCDHW", coordinate_transformation_mode="half_pixel")
+
+    ref_array = np.array(scales)
+    ref_node = helper.make_node('Constant',
+                                inputs=[],
+                                outputs=['scales'],
+                                value=onnx.helper.make_tensor(name='const_tensor',
+                                                              data_type=TensorProto.FLOAT,
+                                                              dims=ref_array.shape,
+                                                              vals=ref_array.flatten().astype(float)))
+
+    graph = helper.make_graph([ref_node, y],
+                              'upsample_trilinear_test',
+                              inputs=[helper.make_tensor_value_info(
+                                  "in", TensorProto.FLOAT, list(in_shape))],
+                              outputs=[helper.make_tensor_value_info("out", TensorProto.FLOAT, list(out_shape))])
+
+    model = helper.make_model(
+        graph, producer_name='upsample_trilinear_test')
+
+    for target, ctx in ctx_list():
+        tvm_out = get_tvm_output(
+            model, in_array, target, ctx, out_shape, 'float32')
+        tvm.testing.assert_allclose(out_array, tvm_out, rtol=1e-5, atol=1e-5)
+
 def test_upsample():
     _test_upsample_nearest()
     _test_upsample_bilinear()
     _test_upsample_bilinear_opset9()
-
+    _test_upsample3d_nearest()
+    _test_upsample3d_trilinear()
 
 def _test_softmax(inshape, axis):
     opname = 'Softmax'
@@ -1291,16 +1366,16 @@ def test_binary_ops():
     dtype = "float32"
     out_shape = in_shape
 
-    def verify_binary_ops(op, x, y, out_np, broadcast=None):
+    def verify_binary_ops(op, x, y, out_np, x_name='in1', y_name='in2', broadcast=None):
         if broadcast is None:
-            z = helper.make_node(op, ['in1', 'in2'], ['out'])
+            z = helper.make_node(op, [x_name, y_name], ['out'])
         else:
-            z = helper.make_node(op, ['in1', 'in2'], ['out'], broadcast=1)
+            z = helper.make_node(op, [x_name, y_name], ['out'], broadcast=1)
         graph = helper.make_graph([z],
                                   '_test',
-                                  inputs=[helper.make_tensor_value_info("in1",
+                                  inputs=[helper.make_tensor_value_info(x_name,
                                                                         TensorProto.FLOAT, list(in_shape)),
-                                          helper.make_tensor_value_info("in2",
+                                          helper.make_tensor_value_info(y_name,
                                                                         TensorProto.FLOAT, list(in_shape))],
                                   outputs=[helper.make_tensor_value_info("out",
                                                                          TensorProto.FLOAT, list(out_shape))])
@@ -1318,6 +1393,7 @@ def test_binary_ops():
     verify_binary_ops("Sub", x, z, x - z, broadcast=True)
     verify_binary_ops("Mul", x, y, x * y, broadcast=None)
     verify_binary_ops("Mul", x, z,  x * z, broadcast=True)
+    verify_binary_ops("Mul", x, x, x * x, x_name='in1', y_name='in1', broadcast=None)
     verify_binary_ops("Div", x, y, x / y, broadcast=None)
     verify_binary_ops("Div", x, z, x / z, broadcast=True)
     verify_binary_ops("Sum", x, y, x + y, broadcast=None)
@@ -1794,37 +1870,51 @@ def verify_conv(x_shape, w_shape, y_shape, padding, kernel_shape, strides, dilat
 
 
 def test_conv():
-    # Convolution with padding
-    # Conv2D
-    verify_conv((1, 1, 5, 5), (1, 1, 3, 3), (1, 1, 5, 5), [1, 1, 1, 1], [3, 3], [1, 1], [1, 1])
-    # Conv1D
-    verify_conv((1, 1, 5), (1, 1, 3), (1, 1, 5), [1, 1], [3], [1], [1])
-
-    # Convolution without padding
-    # Conv2D
-    verify_conv((1, 1, 5, 5), (1, 1, 3, 3), (1, 1, 3, 3), [0, 0, 0, 0], [3, 3], [1, 1], [1, 1])
-    # Conv1D
-    verify_conv((1, 1, 5), (1, 1, 3), (1, 1, 3), [0, 0], [3], [1], [1])
-
-    # Convolution with autopadding
-    verify_conv((1, 1, 5, 5), (1, 1, 3, 3), (1, 1, 5, 5),
-                None, [3, 3], [1, 1], [1, 1],
-                auto_pad="SAME_UPPER")
-    # Conv1D
-    verify_conv((1, 1, 5), (1, 1, 3), (1, 1, 5), None, [3], [1], [1], auto_pad="SAME_UPPER")
-
-    # Convolution with non uniform stride
-    verify_conv((1, 1, 5, 5), (1, 1, 3, 3), (1, 1, 3, 3),
-                None, [3, 3], [2, 2], [1, 1],
-                auto_pad="SAME_UPPER")
-    # Conv1D
-    verify_conv((1, 1, 5), (1, 1, 3), (1, 1, 3), None, [3], [2], [1], auto_pad="SAME_UPPER")
-
-    # Convolution with dilation
-    verify_conv((1, 1, 5, 5), (1, 1, 3, 3), (1, 1, 5, 5), [2, 2, 2, 2], [3, 3], [1, 1], [2, 2])
-    # Conv1D
-    verify_conv((1, 1, 5), (1, 1, 3), (1, 1, 5), [2, 2], [3], [1], [2])
-
+    def repeat(N, D):
+        return tuple([N for _ in range(D)])
+    for D in [1, 2, 3]:
+        # Convolution with padding
+        verify_conv((1, 1) + repeat(5, D),
+                    (1, 1) + repeat(3, D),
+                    (1, 1) + repeat(5, D),
+                    2 * repeat(1, D),
+                    repeat(3, D),
+                    repeat(1, D),
+                    repeat(1, D))
+        # Convolution without padding
+        verify_conv((1, 1) + repeat(5, D),
+                    (1, 1) + repeat(3, D),
+                    (1, 1) + repeat(3, D),
+                    2 * repeat(0, D),
+                    repeat(3, D),
+                    repeat(1, D),
+                    repeat(1, D))
+        # Convolution with autopadding
+        verify_conv((1, 1) + repeat(5, D),
+                    (1, 1) + repeat(3, D),
+                    (1, 1) + repeat(5, D),
+                    None,
+                    repeat(3, D),
+                    repeat(1, D),
+                    repeat(1, D),
+                    auto_pad="SAME_UPPER")
+        # Convolution with non uniform stride
+        verify_conv((1, 1) + repeat(5, D),
+                    (1, 1) + repeat(3, D),
+                    (1, 1) + repeat(3, D),
+                    None,
+                    repeat(3, D),
+                    repeat(2, D),
+                    repeat(1, D),
+                    auto_pad="SAME_UPPER")
+        # Convolution with dilation
+        verify_conv((1, 1) + repeat(5, D),
+                    (1, 1) + repeat(3, D),
+                    (1, 1) + repeat(5, D),
+                    2 * repeat(2, D),
+                    repeat(3, D),
+                    repeat(1, D),
+                    repeat(2, D))
 
 def verify_convtranspose(x_shape, w_shape, y_shape, p):
     node = onnx.helper.make_node("ConvTranspose",
@@ -1965,6 +2055,23 @@ def test_pooling():
                        strides=[2, 2],
                        pads=None,
                        out_shape=[1, 1, 16, 16],
+                       mode=mode,
+                       auto_pad='SAME_UPPER')
+
+        # Pool3D with stride
+        verify_pooling(x_shape=[1, 1, 32, 32, 32],
+                       kernel_shape=[3, 3, 3],
+                       strides=[2, 2, 2],
+                       pads=[1, 1, 1, 1, 1, 1],
+                       out_shape=[1, 1, 16, 16, 16],
+                       mode=mode)
+
+        # Pool3D with stride and autopadding
+        verify_pooling(x_shape=[1, 1, 32, 32, 32],
+                       kernel_shape=[3, 3, 3],
+                       strides=[2, 2, 2],
+                       pads=None,
+                       out_shape=[1, 1, 16, 16, 16],
                        mode=mode,
                        auto_pad='SAME_UPPER')
 
@@ -2195,6 +2302,72 @@ def test_resize():
     verify([1, 16, 32, 32], [], [1, 1, 0.5, 0.5], "linear", "half_pixel")
 
 
+def test_nonzero():
+
+    def verify_nonzero(indata, outdata, dtype):
+        node = helper.make_node('NonZero',
+                                inputs=['X'],
+                                outputs=['Y'],)
+
+        graph = helper.make_graph([node],
+                                  "nonzero_test",
+                                  inputs=[helper.make_tensor_value_info("X", TensorProto.INT64, list(indata.shape))],
+                                  outputs=[helper.make_tensor_value_info("Y", TensorProto.INT64, list(outdata.shape))])
+
+        model = helper.make_model(graph, producer_name='nonzero_test')
+
+        onnx_out = get_onnxruntime_output(model, indata, dtype)
+
+        for target, ctx in [('llvm', tvm.cpu())]:
+            tvm_out = get_tvm_output_with_vm(model, indata, target, ctx, opset=9)
+            tvm.testing.assert_allclose(onnx_out, tvm_out, rtol=1e-05, atol=1e-05)
+
+    input_data = np.array([[1, 0], [1, 1]], dtype=np.int64)
+    result = np.array((np.nonzero(input_data)))  # expected output [[0, 1, 1], [0, 0, 1]]
+    verify_nonzero(input_data, result, dtype=np.int64)
+
+    input_data = np.array([[3, 0, 0], [0, 4, 0], [5, 6, 0]], dtype=np.int64)
+    result = np.array((np.nonzero(input_data)))  # expected output [[0, 1, 2, 2], [0, 1, 0, 1]]
+    verify_nonzero(input_data, result, dtype=np.int64)
+
+def test_topk():
+    def verify_topk(input_dims, K, axis=-1):
+        output_dims = list(input_dims)
+        output_dims[axis] = K
+
+        node = helper.make_node('TopK',
+                                inputs=['X', 'K'],
+                                outputs=['Values', 'Indicies'],
+                                axis=axis)
+
+        graph = helper.make_graph([node],
+                                  "topk_test",
+                                  inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, list(input_dims)),
+                                          helper.make_tensor_value_info("K", TensorProto.INT64, [1,])],
+                                  initializer=[helper.make_tensor("K", TensorProto.INT64, [1], [K])],
+                                  outputs=[helper.make_tensor_value_info("Values", TensorProto.FLOAT, output_dims), 
+                                           helper.make_tensor_value_info("Indicies", TensorProto.INT64, output_dims)])
+
+        model = helper.make_model(graph, producer_name='topk_test')
+
+        indata = np.random.uniform(-10, 10, input_dims).astype(np.float32)
+        onnx_out = get_onnxruntime_output(model, [indata, k])
+
+        for target, ctx in [('llvm', tvm.cpu())]:
+            tvm_out = get_tvm_output(model, indata, target, ctx, [output_dims, output_dims], 
+                    output_dtype=['float32', 'int64'])
+            tvm.testing.assert_allclose(onnx_out, tvm_out, rtol=1e-05, atol=1e-05)
+    
+    for n in [12, 32]:
+        for shape in [[n], [n, n], [n, n, n]]:
+            for k in [1, 5, 10]:
+                verify_topk(shape, k)
+
+        verify_topk([n, n, n], 5, 0)
+        verify_topk([n, n, n], 5, 1)
+        verify_topk([n, n, n], 5, 2)
+    
+
 if __name__ == '__main__':
     test_flatten()
     test_reshape()
@@ -2255,3 +2428,5 @@ if __name__ == '__main__':
     test_pooling()
     test_lstm()
     test_resize()
+    test_nonzero()
+    test_topk()

@@ -233,6 +233,54 @@ inline Tensor reshape(const Tensor& x,
 }
 
 /*!
+ * \brief Converts a flat index or array of flat indices into a tuple of coordinate arrays
+ *
+ * \param x The input tensor having indices.
+ * \param shape The shape tensor
+ * \param name The name of the operation
+ * \param tag The tag to mark the operation
+ *
+ * \return A Tensor of coordinate arrays.
+ */
+
+inline Tensor unravel_index(const Tensor& x,
+                            const Tensor& shape,
+                            std::string name = "T_unravel",
+                            std::string tag = kInjective) {
+  auto x_shape = x->shape;
+  auto shape_shape = shape->shape;
+
+  Array<PrimExpr> oshape;
+  oshape.push_back(shape_shape[0]);
+  if (x_shape.size() != 0) {
+    oshape.push_back(x_shape[0]);
+  }
+
+  auto func = [&](const Array<Var>& indices) {
+    auto i = indices[0];
+    std::vector<PrimExpr> indices_divs;
+    PrimExpr ret = 0;
+    PrimExpr cur_val = 0;
+    PrimExpr index_val = 0;
+
+    if (x_shape.size() != 0) {
+      index_val = x[indices[1]];
+    } else {
+      index_val = x();
+    }
+    indices_divs.push_back(index_val);
+    for (int v = GetConstInt(shape_shape[0]) - 1; v >= 0; --v) {
+      ret = tvm::if_then_else(i == v, indexmod(indices_divs.back(), shape[v]), ret);
+      cur_val = indexdiv(indices_divs.back(), shape[v]);
+      indices_divs.push_back(cur_val);
+    }
+    return ret;
+  };
+
+  return compute(oshape, func, name, tag);
+}
+
+/*!
 * \brief Remove size 1 dimensions from the shape of a tensor.
 * The removed dimensions must have a constant size of 1.
 *
@@ -327,12 +375,12 @@ inline Tensor concatenate(const Array<Tensor>& inputs,
   for (auto t : inputs) {
     axis_sizes.push_back(t->shape[axis]);
   }
-
+  arith::Analyzer analyzer;
   PrimExpr join_size = axis_sizes[0];
   for (size_t i = 1; i < axis_sizes.size(); ++i) {
     join_size += axis_sizes[i];
   }
-  join_size = tvm::tir::Simplify(join_size);
+  join_size = analyzer.Simplify(join_size);
   Array<PrimExpr> out_shape;
   for (size_t i = 0; i < inputs[0]->shape.size(); ++i) {
     out_shape.push_back(i == static_cast<size_t>(axis) ? join_size : inputs[0]->shape[i]);
@@ -1210,7 +1258,7 @@ inline Tensor layout_transform(const Tensor& src,
   CHECK(src_layout_struct.defined() && dst_layout_struct.defined())
     << "cannot convert from/to undefined layout";
 
-  auto layout_converter = BijectiveLayoutNode::make(src_layout_struct, dst_layout_struct);
+  auto layout_converter = tir::BijectiveLayout(src_layout_struct, dst_layout_struct);
   CHECK(layout_converter.defined())
     << "cannot convert from " << src_layout << " to " << dst_layout;
 

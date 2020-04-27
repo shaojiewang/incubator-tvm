@@ -23,7 +23,9 @@
  */
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/data_layout.h>
-#include <tvm/tir/ir_pass.h>
+#include <tvm/tir/stmt_functor.h>
+#include <tvm/arith/analyzer.h>
+
 #include <cctype>
 
 namespace tvm {
@@ -253,15 +255,16 @@ inline bool GetStoreRule(Array<PrimExpr>* rule,
 }
 
 inline Array<PrimExpr> TransformIndex(const Array<PrimExpr>& src_index,
-                                  const Array<IterVar>& src_axis,
-                                  const Array<PrimExpr>& transform_rule) {
+                                      const Array<IterVar>& src_axis,
+                                      const Array<PrimExpr>& transform_rule) {
+  arith::Analyzer ana;
   Array<PrimExpr> result;
   std::unordered_map<const tir::VarNode*, PrimExpr> bind_map;
   for (size_t i = 0; i < src_index.size(); ++i) {
     bind_map[src_axis[i]->var.get()] = src_index[i];
   }
   for (PrimExpr rule : transform_rule) {
-    result.push_back(tir::Simplify(tir::Substitute(rule, bind_map)));
+    result.push_back(ana.Simplify(tir::Substitute(rule, bind_map)));
   }
   return result;
 }
@@ -284,9 +287,10 @@ Array<PrimExpr> BijectiveLayout::BackwardIndex(const Array<PrimExpr>& dst_index)
 }
 
 inline Array<PrimExpr> TransformShape(const Array<PrimExpr>& src_shape,
-                                  const Array<IterVar>& src_axis,
-                                  const Array<IterVar>& target_axis,
-                                  const Array<PrimExpr>& transform_rule) {
+                                      const Array<IterVar>& src_axis,
+                                      const Array<IterVar>& target_axis,
+                                      const Array<PrimExpr>& transform_rule) {
+  arith::Analyzer ana;
   CHECK_EQ(src_shape.size(), src_axis.size());
   // bind variables for original axes
   // for major-axis, bind the corresponding size
@@ -329,7 +333,7 @@ inline Array<PrimExpr> TransformShape(const Array<PrimExpr>& src_shape,
       if (symbolic_var_set.count(i)) {
         result.push_back(tir::AnyNode::make());
       } else {
-        result.push_back(tir::Simplify(tir::Substitute(rule, bind_map)));
+        result.push_back(ana.Simplify(tir::Substitute(rule, bind_map)));
       }
     }
   }
@@ -350,20 +354,18 @@ Array<PrimExpr> BijectiveLayout::BackwardShape(const Array<PrimExpr>& shape) con
                         self->src_layout->axes, self->backward_rule);
 }
 
-BijectiveLayout BijectiveLayoutNode::make(const Layout& src_layout,
-                                          const Layout& dst_layout) {
+BijectiveLayout::BijectiveLayout(Layout src_layout, Layout dst_layout) {
   auto n = make_object<BijectiveLayoutNode>();
 
-  n->src_layout = src_layout;
-  n->dst_layout = dst_layout;
+  n->src_layout = std::move(src_layout);
+  n->dst_layout = std::move(dst_layout);
 
-  if (!GetStoreRule(&n->forward_rule, n->src_layout, n->dst_layout)) {
-    // not convertible
-    return BijectiveLayout();
+  // To be consistent with previous behavior, a nullptr layout is created
+  // when argument is invalid.
+  if (GetStoreRule(&n->forward_rule, n->src_layout, n->dst_layout)) {
+    CHECK(GetStoreRule(&n->backward_rule, n->dst_layout, n->src_layout));
+    data_ = std::move(n);
   }
-  CHECK(GetStoreRule(&n->backward_rule, n->dst_layout, n->src_layout));
-
-  return BijectiveLayout(n);
 }
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
@@ -398,7 +400,9 @@ TVM_REGISTER_GLOBAL("tir.LayoutGetItem")
 });
 
 TVM_REGISTER_GLOBAL("tir.BijectiveLayout")
-.set_body_typed(BijectiveLayoutNode::make);
+.set_body_typed([](Layout src_layout, Layout dst_layout) -> BijectiveLayout {
+  return BijectiveLayout(src_layout, dst_layout);
+});
 
 TVM_REGISTER_GLOBAL("tir.BijectiveLayoutForwardIndex")
 .set_body_method(&BijectiveLayout::ForwardIndex);

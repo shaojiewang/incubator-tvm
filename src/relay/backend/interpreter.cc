@@ -18,7 +18,7 @@
  */
 
 /*!
- * \file src/tvm/relay/interpreter.cc
+ * \file src/relay/interpreter.cc
  * \brief An interpreter for the Relay IR.
  */
 #include <tvm/runtime/device_api.h>
@@ -244,11 +244,6 @@ class Interpreter :
     return VisitExpr(expr);
   }
 
-  ObjectRef VisitExpr(const Expr& expr) final {
-    auto ret = ExprFunctor<ObjectRef(const Expr& n)>::VisitExpr(expr);
-    return ret;
-  }
-
   ObjectRef VisitExpr_(const VarNode* var_node) final {
     return Lookup(GetRef<Var>(var_node));
   }
@@ -309,7 +304,7 @@ class Interpreter :
 
   Array<Shape> ComputeDynamicShape(const Function& func,
                                    const Array<ObjectRef>& args) {
-    auto key = CCacheKeyNode::make(func, Target::Create("llvm"));
+    CCacheKey key(func, Target::Create("llvm"));
     auto cfunc = engine_->LowerShapeFunc(key);
     size_t arity = cfunc->inputs.size() + cfunc->outputs.size();
 
@@ -516,11 +511,11 @@ class Interpreter :
     }
 
     if (is_dyn) {
-      CHECK(func->IsPrimitive());
+      CHECK(func->HasNonzeroAttr(attr::kPrimitive));
       out_shapes = ComputeDynamicShape(func, args);
     }
 
-    PackedFunc packed_func = engine_->JIT(CCacheKeyNode::make(func, target_));
+    PackedFunc packed_func = engine_->JIT(CCacheKey(func, target_));
     TVMRetValue rv;
     if (const TupleTypeNode* rtype = func->body->checked_type().as<TupleTypeNode>()) {
       CHECK(!is_dyn || out_shapes.size() == rtype->fields.size());
@@ -556,7 +551,7 @@ class Interpreter :
                    const tvm::Array<ObjectRef>& args,
                    const Var& bind = Var()) {
     // Get a reference to the function inside the closure.
-    if (closure->func->IsPrimitive()) {
+    if (closure->func->HasNonzeroAttr(attr::kPrimitive)) {
       return InvokePrimitiveOp(closure->func, args);
     }
     auto func = closure->func;
