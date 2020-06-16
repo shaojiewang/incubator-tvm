@@ -87,10 +87,12 @@ def _mx_fully_connected(inputs, attrs):
 
 
 def _get_channel_axis(layout, op_name):
-    if layout == "NCHW":
+    if layout in ["NCHW", "NCDHW"]:
         return 1
     if layout == "NHWC":
         return 3
+    if layout == "NDHWC":
+        return 4
     raise tvm.error.OpAttributeInvalid(
         'Value {} in attribute "layout" of operator {} is not valid.'.format(layout, op_name))
 
@@ -149,13 +151,15 @@ def _mx_zeros(inputs, attrs):
 
 def _mx_conv(inputs, attrs):
     kernel_size = attrs.get_int_tuple("kernel")
-    if len(kernel_size) == 2:
+    if len(kernel_size) == 3:
+        return _mx_conv3d(inputs, attrs)
+    elif len(kernel_size) == 2:
         return _mx_conv2d(inputs, attrs)
     elif len(kernel_size) == 1:
         return _mx_conv1d(inputs, attrs)
     else:
         raise tvm.error.OpAttributeInvalid(
-            '1D or 2D kernels only are supported for operator Convolution')
+            '1D, 2D or 3D kernels only are supported for operator Convolution')
 
 def _mx_conv1d(inputs, attrs):
     kernel_size = attrs.get_int_tuple("kernel")
@@ -226,15 +230,53 @@ def _mx_conv2d(inputs, attrs):
     return res
 
 
+def _get_mx_conv3d_attrs(attrs):
+    kernel_size = attrs.get_int_tuple("kernel")
+    data_layout = attrs.get_str("layout", "NCDHW")
+    if "kernel_layout" in attrs.attrs:
+        kernel_layout = attrs.get_str("kernel_layout")
+    else:
+        kernel_layout = "DHWIO" if data_layout == "NDHWC" else "OIDHW"
+    new_attrs = {}
+    new_attrs["channels"] = attrs.get_int("num_filter")
+    new_attrs["kernel_size"] = kernel_size
+    new_attrs["strides"] = attrs.get_int_tuple("stride", (1, 1, 1))
+    new_attrs["padding"] = attrs.get_int_tuple("pad", (0, 0, 0))
+    new_attrs["dilation"] = attrs.get_int_tuple("dilate", (1, 1, 1))
+    new_attrs["groups"] = attrs.get_int("num_group", 1)
+    new_attrs["data_layout"] = data_layout
+    new_attrs["kernel_layout"] = kernel_layout
+    return new_attrs
+
+
+def _mx_conv3d(inputs, attrs):
+    kernel_size = attrs.get_int_tuple("kernel")
+    data_layout = attrs.get_str("layout", "NCDHW")
+    if len(kernel_size) != 3:
+        raise tvm.error.OpAttributeInvalid(
+            'Only 3D kernels are supported for operator Convolution')
+
+    new_attrs = _get_mx_conv3d_attrs(attrs)
+    channel_axis = _get_channel_axis(data_layout, "conv3d")
+    use_bias = not attrs.get_bool("no_bias", False)
+    res = _op.nn.conv3d(inputs[0], inputs[1], **new_attrs)
+    if use_bias:
+        assert len(inputs) == 3
+        res = _op.nn.bias_add(res, inputs[2], axis=channel_axis)
+    return res
+
+
 def _mx_conv_transpose(inputs, attrs):
     kernel_size = attrs.get_int_tuple("kernel")
-    if len(kernel_size) == 2:
+    if len(kernel_size) == 3:
+        return _mx_conv3d_transpose(inputs, attrs)
+    elif len(kernel_size) == 2:
         return _mx_conv2d_transpose(inputs, attrs)
     elif len(kernel_size) == 1:
         return _mx_conv1d_transpose(inputs, attrs)
     else:
         raise tvm.error.OpAttributeInvalid(
-            '1D or 2D kernels only are supported for operator Convolution')
+            '1D, 2D or 3D kernels only are supported for operator Convolution')
 
 
 def _mx_conv1d_transpose(inputs, attrs):
@@ -293,6 +335,41 @@ def _mx_conv2d_transpose(inputs, attrs):
     new_attrs["kernel_layout"] = kernel_layout
     use_bias = not attrs.get_bool("no_bias", True)
     res = _op.nn.conv2d_transpose(inputs[0], inputs[1], **new_attrs)
+
+    if use_bias:
+        assert len(inputs) == 3
+        res = _op.nn.bias_add(res, inputs[2], axis=channel_axis)
+    return res
+
+
+def _mx_conv3d_transpose(inputs, attrs):
+    if "target_shape" in attrs.attrs:
+        raise tvm.error.OpAttributeUnImplemented(
+            'Attribute "target_shape" is not supported for operator Conv3D-transpose.')
+    kernel_size = attrs.get_int_tuple("kernel")
+    if len(kernel_size) != 3:
+        raise tvm.error.OpAttributeInvalid(
+            'Non-3D kernels are not supported for operator Conv3D-transpose.')
+    data_layout = attrs.get_str("layout", "NCDHW")
+    channel_axis = _get_channel_axis(data_layout, "conv3d_transpose")
+
+    if "kernel_layout" in attrs.attrs:
+        kernel_layout = attrs.get_str("kernel_layout")
+    else:
+        kernel_layout = "DHWIO" if data_layout == "NDHWC" else "OIDHW"
+
+    new_attrs = {}
+    new_attrs["channels"] = attrs.get_int("num_filter")
+    new_attrs["kernel_size"] = kernel_size
+    new_attrs["strides"] = attrs.get_int_tuple("stride", (1, 1, 1))
+    new_attrs["output_padding"] = attrs.get_int_tuple("adj", (0, 0, 0))
+    new_attrs["padding"] = attrs.get_int_tuple("pad", (0, 0, 0))
+    new_attrs["dilation"] = attrs.get_int_tuple("dilate", (1, 1, 1))
+    new_attrs["groups"] = attrs.get_int("num_group", 1)
+    new_attrs["data_layout"] = data_layout
+    new_attrs["kernel_layout"] = kernel_layout
+    use_bias = not attrs.get_bool("no_bias", True)
+    res = _op.nn.conv3d_transpose(inputs[0], inputs[1], **new_attrs)
 
     if use_bias:
         assert len(inputs) == 3
@@ -411,16 +488,22 @@ def _mx_slice(inputs, attrs):
     begin = list(attrs.get_int_tuple('begin', None))
     end = list(attrs.get_int_tuple('end', None))
     stride = attrs.get_int_tuple('step', None)
+    input_shape = _infer_type(inputs[0]).checked_type.shape
     if begin is None:
         raise tvm.error.OpAttributeRequired(
             'Attribute "begin" not found in operator Slice.')
     if end is None:
         raise tvm.error.OpAttributeRequired(
             'Attribute "end" not found in operator Slice.')
-    begin = tuple(x if x is not None else 0 for x in begin)
-    new_attrs = {'begin': begin, 'end': end}
+    begin = (x if x is not None else 0 for x in begin)
+    for i, ed in enumerate(end):
+        if ed is None:
+            end[i] = input_shape[i]
+    new_attrs = {'begin': _expr.const(list(begin), dtype="int32"),
+                 'end': _expr.const(list(end), dtype="int32")}
     if stride is not None:
-        new_attrs['strides'] = stride
+        stride = (x if x is not None else 1 for x in stride)
+        new_attrs['strides'] = _expr.const(list(stride), dtype="int32")
     return _op.strided_slice(inputs[0], **new_attrs)
 
 
@@ -460,7 +543,9 @@ def _mx_slice_axis(inputs, attrs):
         else:
             begin.append(ax_beg)
             end.append(ax_end)
-    return _op.strided_slice(inputs[0], begin, end)
+    return _op.strided_slice(inputs[0],
+                             _expr.const(begin, dtype="int32"),
+                             _expr.const(end, dtype="int32"))
 
 
 def _mx_crop_like(inputs, attrs):
@@ -480,9 +565,9 @@ def _mx_crop_like(inputs, attrs):
         return _op.slice_like(*inputs, **new_attrs)
     expr = _infer_type(inputs[1])
     like_shape = expr.checked_type.shape
-    new_attrs['begin'] = [0, 0, offset[0], offset[1]]
-    new_attrs['end'] = [like_shape[0], like_shape[1], offset[0]+like_shape[2],
-                        offset[1]+like_shape[3]]
+    new_attrs['begin'] = _expr.const([0, 0, offset[0], offset[1]], dtype="int32")
+    new_attrs['end'] = _expr.const([like_shape[0], like_shape[1], offset[0]+like_shape[2],
+                                    offset[1]+like_shape[3]], dtype="int32")
     return _op.strided_slice(inputs[0], **new_attrs)
 
 
@@ -656,7 +741,7 @@ def _mx_multibox_detection(inputs, attrs):
 
     ret = _op.vision.multibox_transform_loc(inputs[0], inputs[1],
                                             inputs[2], **new_attrs0)
-    return _op.vision.non_max_suppression(ret[0], ret[1], **new_attrs1)
+    return _op.vision.non_max_suppression(ret[0], ret[1], ret[1], **new_attrs1)
 
 
 def _mx_batch_dot(inputs, attrs):
@@ -820,6 +905,7 @@ def _mx_box_nms(inputs, attrs):
                                       id_index=id_index, score_index=score_index)
     nms_out = _op.vision.non_max_suppression(ret[1],
                                              ret[0],
+                                             ret[2],
                                              iou_threshold=iou_thresh,
                                              force_suppress=force_suppress,
                                              top_k=top_k,
@@ -844,6 +930,11 @@ def _mx_l2_normalize(inputs, attrs):
 
 def _mx_softsign(inputs, attrs):
     return inputs[0] / (_expr.const(1.0) + _op.abs(inputs[0]))
+
+
+def _mx_softmin(inputs, attrs):
+    axis = attrs.get_int("axis", -1)
+    return _op.nn.softmax(_op.negative(inputs[0]), axis)
 
 
 def _mx_hard_sigmoid(inputs, attrs):
@@ -1829,6 +1920,7 @@ _identity_list = [
     "floor",
     "ceil",
     "round",
+    "trunc",
     "sign",
     "sigmoid",
     "negative",
@@ -1938,6 +2030,7 @@ _convert_map = {
     "log_softmax"   : _softmax_op(_op.nn.log_softmax),
     "Softmax"       : _softmax_op(_op.nn.softmax),
     "softsign"      : _mx_softsign,
+    "softmin"       : _mx_softmin,
     "hard_sigmoid"  : _mx_hard_sigmoid,
     "reciprocal"    : _mx_reciprocal,
     # per op specialization

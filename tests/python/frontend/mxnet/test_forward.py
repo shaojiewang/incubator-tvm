@@ -372,8 +372,17 @@ def test_forward_elemwise_ops():
                 tvm.testing.assert_allclose(op_res.asnumpy(), ref_res.asnumpy())
 
 
+def test_forward_softmin():
+    data = mx.sym.var('data')
+    mx_sym = mx.sym.softmin(data)
+    verify_mxnet_frontend_impl(mx_sym, (1, 3, 100, 100), (1, 3, 100, 100))
+
+    mx_sym = mx.sym.softmin(data, axis=2)
+    verify_mxnet_frontend_impl(mx_sym, (1, 3, 100, 100), (1, 3, 100, 100))
+
+
 def test_forward_unary_ops():
-    for op in ["abs", "sqrt", "ceil", "floor", "round", "reciprocal",
+    for op in ["abs", "sqrt", "ceil", "floor", "round", "reciprocal", "trunc",
                "softsign", "hard_sigmoid",
                "cos", "sin", "tan",
                "cosh", "sinh", "tanh",
@@ -1024,6 +1033,10 @@ def test_forward_convolution():
     verify(data_shape=(20, 8, 32, 32), kernel_size=(3, 3), stride=(1, 1), pad=(1, 1), num_filter=2)
     verify(data_shape=(1, 8, 32, 32), kernel_size=(3, 3), stride=(1, 1), pad=(1, 1), num_filter=8,
            is_depthwise=True)
+    verify(data_shape=(1, 1, 16, 16, 16), kernel_size=(3, 3, 3), stride=(1, 1, 1), pad=(1, 1, 1), num_filter=2)
+    verify(data_shape=(20, 1, 16, 16, 16), kernel_size=(3, 3, 3), stride=(1, 1, 1), pad=(1, 1, 1), num_filter=2)
+    verify(data_shape=(1, 8, 16, 16, 16), kernel_size=(3, 3, 3), stride=(2, 2, 2), pad=(1, 1, 1), num_filter=2)
+    verify(data_shape=(20, 8, 16, 16, 16), kernel_size=(3, 3, 3), stride=(1, 1, 1), pad=(1, 1, 1), num_filter=2)
 
 def test_forward_deconvolution():
     def verify(data_shape, kernel_size, stride, pad, num_filter):
@@ -1191,6 +1204,7 @@ if __name__ == '__main__':
     test_forward_rrelu()
     test_forward_prelu()
     test_forward_softrelu()
+    test_forward_softmin()
     test_forward_fc_flatten()
     test_forward_clip()
     test_forward_split()
