@@ -83,7 +83,7 @@ Var Var::copy_with_suffix(const String& suffix) const {
   } else {
     new_ptr = make_object<VarNode>(*node);
   }
-  new_ptr->name_hint = new_ptr->name_hint.operator std::string() + suffix.operator std::string();
+  new_ptr->name_hint = new_ptr->name_hint + suffix;
   return Var(new_ptr);
 }
 
@@ -698,50 +698,20 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     });
 
 // Call
-Call::Call(DataType dtype, String name, Array<PrimExpr> args, CallType call_type) {
+Call::Call(DataType dtype, RelayExpr op, Array<PrimExpr> args) {
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i].defined());
   }
 
   ObjectPtr<CallNode> node = make_object<CallNode>();
   node->dtype = dtype;
-  node->name = std::move(name);
+  node->op = std::move(op);
   node->args = std::move(args);
-  node->call_type = call_type;
   data_ = std::move(node);
 }
 
-const char* CallNode::vectorizable_intrinsics[] = {"floor",
-                                                   "ceil",
-                                                   "sign",
-                                                   "trunc",
-                                                   "fabs",
-                                                   "round",
-                                                   "exp",
-                                                   "tanh",
-                                                   "sqrt",
-                                                   "log",
-                                                   "sin",
-                                                   "cos",
-                                                   "pow",
-                                                   "tan",
-                                                   tir::CallNode::shift_left,
-                                                   tir::CallNode::shift_right,
-                                                   tir::CallNode::likely,
-                                                   tir::CallNode::popcount};
-
-bool CallNode::is_vectorizable() const {
-  size_t cnt = sizeof(CallNode::vectorizable_intrinsics) / sizeof(char*);
-  for (size_t i = 0; i < cnt; ++i) {
-    if (name == CallNode::vectorizable_intrinsics[i]) {
-      return true;
-    }
-  }
-  return false;
-}
-
 TVM_REGISTER_GLOBAL("tir.Call")
-    .set_body_typed([](DataType type, String name, Array<ObjectRef> args, int call_type) {
+    .set_body_typed([](DataType type, RelayExpr op, Array<ObjectRef> args) {
       Array<PrimExpr> prim_expr_args;
       for (const auto& it : args) {
         CHECK(it->IsInstance<runtime::StringObj>() || it->IsInstance<PrimExprNode>());
@@ -751,7 +721,7 @@ TVM_REGISTER_GLOBAL("tir.Call")
           prim_expr_args.push_back(Downcast<PrimExpr>(it));
         }
       }
-      return Call(type, name, prim_expr_args, static_cast<CallNode::CallType>(call_type));
+      return Call(type, op, prim_expr_args);
     });
 
 TVM_REGISTER_NODE_TYPE(CallNode);
@@ -759,7 +729,13 @@ TVM_REGISTER_NODE_TYPE(CallNode);
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     .set_dispatch<CallNode>([](const ObjectRef& node, ReprPrinter* p) {
       auto* op = static_cast<const CallNode*>(node.get());
-      p->stream << op->name << "(";
+      if (auto* ptr_op = op->op.as<OpNode>()) {
+        p->stream << ptr_op->name << "(";
+      } else {
+        auto* ptr_gvar = op->op.as<GlobalVarNode>();
+        CHECK(ptr_gvar != nullptr);
+        p->stream << "@" << ptr_gvar->name_hint << "(";
+      }
       for (size_t i = 0; i < op->args.size(); ++i) {
         p->Print(op->args[i]);
         if (i < op->args.size() - 1) {
@@ -881,7 +857,7 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 
 // Reduce
 Reduce::Reduce(CommReducer combiner, Array<PrimExpr> source, Array<IterVar> axis,
-               PrimExpr condition, int value_index) {
+               PrimExpr condition, int value_index, Array<PrimExpr> init) {
   for (size_t i = 0; i < axis.size(); ++i) {
     CHECK_EQ(axis[i]->iter_type, kCommReduce) << "Can only take axis created by reduce_axis";
   }
@@ -893,9 +869,18 @@ Reduce::Reduce(CommReducer combiner, Array<PrimExpr> source, Array<IterVar> axis
   for (size_t i = 0; i < axis.size(); ++i) {
     CHECK(axis[i].defined());
   }
+  if (!init.empty()) {
+    CHECK_EQ(init.size(), source.size()) << "Number of inits should match number of exprs";
+    for (size_t i = 0; i < init.size(); i++) {
+      CHECK(init[i]->IsInstance<ProducerLoadNode>() || init[i]->IsInstance<IntImmNode>() ||
+            init[i]->IsInstance<FloatImmNode>())
+          << "init can only be a IntImm, FloatImm or ProducerLoad";
+    }
+  }
   n->dtype = source[value_index].dtype();
   n->combiner = std::move(combiner);
   n->source = std::move(source);
+  n->init = std::move(init);
   n->axis = std::move(axis);
   n->condition = condition;
   n->value_index = value_index;
@@ -904,8 +889,8 @@ Reduce::Reduce(CommReducer combiner, Array<PrimExpr> source, Array<IterVar> axis
 
 TVM_REGISTER_GLOBAL("tir.Reduce")
     .set_body_typed([](CommReducer combiner, Array<PrimExpr> source, Array<IterVar> axis,
-                       PrimExpr condition, int value_index) {
-      return Reduce(combiner, source, axis, condition, value_index);
+                       PrimExpr condition, int value_index, Array<PrimExpr> init) {
+      return Reduce(combiner, source, axis, condition, value_index, init);
     });
 
 TVM_REGISTER_NODE_TYPE(ReduceNode);
@@ -915,6 +900,7 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
       auto* op = static_cast<const ReduceNode*>(node.get());
       p->stream << "reduce(combiner=" << op->combiner;
       p->stream << ", source=" << op->source;
+      p->stream << ", init=" << op->init;
       p->stream << ", axis=" << op->axis;
       p->stream << ", where=" << op->condition;
       p->stream << ", value_index=" << op->value_index;

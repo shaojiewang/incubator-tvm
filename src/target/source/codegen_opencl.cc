@@ -70,6 +70,11 @@ std::string CodeGenOpenCL::Finish() {
                    "#endif\n\n";
   }
 
+  // Enable atomic_add used by get_valid_counts. Only needed for OpenCL < 1.1.
+  if (enable_atomics_) {
+    decl_stream << "#pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable\n"
+                   "#pragma OPENCL EXTENSION cl_khr_global_int32_extended_atomics : enable\n\n";
+  }
   return CodeGenC::Finish();
 }
 
@@ -224,6 +229,32 @@ std::string CodeGenOpenCL::CastFromTo(std::string value, DataType from, DataType
   return os.str();
 }
 
+void CodeGenOpenCL::VisitExpr_(const CallNode* op, std::ostream& os) {
+  if (op->op.same_as(builtin::address_of())) {
+    // Overload tvm_address_of to add storage scope (e.g. __global).
+    const LoadNode* load = op->args[0].as<LoadNode>();
+    CHECK(op->args.size() == 1 && load);
+    os << "((";
+    auto it = alloc_storage_scope_.find(load->buffer_var.get());
+    if (it != alloc_storage_scope_.end()) {
+      PrintStorageScope(it->second, os);
+    }
+    this->PrintType(load->dtype.element_of(), os);
+    os << " *)" << this->GetVarID(load->buffer_var.get()) << " + ";
+    this->PrintExpr(load->index, os);
+    os << ')';
+  } else if (op->op.same_as(builtin_call_extern_)) {
+    auto func = Downcast<StringImm>(op->args[0]);
+    // Enable atomics extension if used.
+    if (func->value == "atomic_add") {
+      enable_atomics_ = true;
+    }
+    CodeGenC::VisitExpr_(op, os);
+  } else {
+    CodeGenC::VisitExpr_(op, os);
+  }
+}
+
 void CodeGenOpenCL::VisitExpr_(const BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
   std::string v = PrintExpr(op->value);
   os << "((";
@@ -249,7 +280,7 @@ void CodeGenOpenCL::VisitExpr_(const FloatImmNode* op, std::ostream& os) {  // N
   }
 }
 
-runtime::Module BuildOpenCL(IRModule mod, std::string target) {
+runtime::Module BuildOpenCL(IRModule mod, Target target) {
   using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenOpenCL cg;

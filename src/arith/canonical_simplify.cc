@@ -59,13 +59,6 @@ class CanonicalExprNode : public PrimExprNode {
   TVM_DECLARE_BASE_OBJECT_INFO(CanonicalExprNode, PrimExprNode);
 };
 
-enum DivMode {
-  /*! \brief Truncated division. */
-  kTruncDiv,
-  /*! \brief Floor division. */
-  kFloorDiv
-};
-
 inline PrimExpr ModImpl(PrimExpr a, PrimExpr b, DivMode mode) {
   if (mode == kTruncDiv) {
     return truncmod(a, b);
@@ -692,6 +685,7 @@ SplitExpr CanonicalSimplifier::Impl::SplitDivConst(SplitExpr lhs, int64_t cval, 
   CHECK(lhs->DivModeCompatibleTo(div_mode));
   CHECK_EQ(lhs->scale, 1);
   lhs.CopyOnWrite()->lower_factor *= cval;
+  lhs.CopyOnWrite()->div_mode = div_mode;
   return lhs;
 }
 
@@ -1017,8 +1011,10 @@ PrimExpr CanonicalSimplifier::Impl::SimplifyReduceCombiner(const ReduceNode* op)
 
   // components which have side effects should also be preserved
   for (size_t i = 0; i < used.size(); ++i) {
-    if (HasSideEffect(op->source[i]) || HasSideEffect(op->combiner->identity_element[i]) ||
-        HasSideEffect(op->combiner->result[i])) {
+    if (SideEffect(op->source[i]) > CallEffectKind::kReadState ||
+        SideEffect(op->combiner->identity_element[i]) > CallEffectKind::kReadState ||
+        SideEffect(op->combiner->result[i]) > CallEffectKind::kReadState ||
+        (!op->init.empty() && SideEffect(op->init[i]) > CallEffectKind::kReadState)) {
       mark_used(i);
     }
   }
@@ -1029,6 +1025,7 @@ PrimExpr CanonicalSimplifier::Impl::SimplifyReduceCombiner(const ReduceNode* op)
   Array<Var> new_lhs;
   Array<Var> new_rhs;
   Array<PrimExpr> new_source;
+  Array<PrimExpr> new_init;
 
   // new stuff is old stuff which is used
   for (size_t i = 0; i < used.size(); ++i) {
@@ -1039,6 +1036,7 @@ PrimExpr CanonicalSimplifier::Impl::SimplifyReduceCombiner(const ReduceNode* op)
       new_lhs.push_back(op->combiner->lhs[i]);
       new_rhs.push_back(op->combiner->rhs[i]);
       new_source.push_back(op->source[i]);
+      if (!op->init.empty()) new_init.push_back(op->init[i]);
     } else if (static_cast<int>(i) < op->value_index) {
       // value_index should also be adjusted
       new_value_index--;
@@ -1046,7 +1044,7 @@ PrimExpr CanonicalSimplifier::Impl::SimplifyReduceCombiner(const ReduceNode* op)
   }
 
   CommReducer new_combiner = CommReducer(new_lhs, new_rhs, new_result, new_identity);
-  return Reduce(new_combiner, new_source, op->axis, op->condition, new_value_index);
+  return Reduce(new_combiner, new_source, op->axis, op->condition, new_value_index, new_init);
 }
 
 PrimExpr CanonicalSimplifier::Impl::VisitExpr_(const ReduceNode* op) {
@@ -1056,6 +1054,11 @@ PrimExpr CanonicalSimplifier::Impl::VisitExpr_(const ReduceNode* op) {
   // already been simplified by const reduction axis removal
   if (op == nullptr) return ret;
   if (op->axis.empty()) {
+    if (!op->init.empty()) {
+      return this->VisitExpr(Select(op->condition,
+                                    (*op->combiner.get())(op->init, op->source)[op->value_index],
+                                    op->init[op->value_index]));
+    }
     // Note that here we assume that the identity element is indeed identity. Without this
     // assumption we would have to perform a single iteration of the loop, i.e. use
     // `(*op->combiner.get())(op->combineop->identity_element, op->source)[op->value_index]`

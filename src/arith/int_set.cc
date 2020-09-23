@@ -289,8 +289,8 @@ inline IntervalSet Combine<tir::FloorMod>(Analyzer* analyzer, IntervalSet a, Int
     if (analyzer->CanProveGreaterEqual(divisor, 0)) {
       if (divisor.as<tir::IntImmNode>()) {
         // a mod b = a - (a / b) * b if a_max / b == a_min / b
-        auto qmax = floordiv(a->max_value, divisor);
-        auto qmin = floordiv(a->min_value, divisor);
+        auto qmax = a->HasUpperBound() ? floordiv(a->max_value, divisor) : pos_inf();
+        auto qmin = a->HasLowerBound() ? floordiv(a->min_value, divisor) : neg_inf();
         if (analyzer->CanProve(qmax == qmin)) {
           auto tmax = a->max_value - divisor * qmin;
           auto tmin = a->min_value - divisor * qmin;
@@ -441,6 +441,15 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
     return Union(analyzer_, false_set, true_set);
   }
 
+  IntervalSet VisitExpr_(const CastNode* op) final {
+    IntervalSet value_set = this->Eval(op->value);
+    PrimExpr min_value =
+        value_set->HasLowerBound() ? cast(op->dtype, value_set->min_value) : neg_inf();
+    PrimExpr max_value =
+        value_set->HasUpperBound() ? cast(op->dtype, value_set->max_value) : pos_inf();
+    return IntervalSet(min_value, max_value);
+  }
+
   IntervalSet VisitExprDefault_(const Object* op) final {
     DLOG(WARNING) << "cannot evaluate set type " << op->GetTypeKey();
     return IntervalSet::Everything();
@@ -493,14 +502,14 @@ IntSet IntSetAnalyzer::operator()(const PrimExpr& expr, const Map<Var, IntSet>& 
 
 // Quickly adapt to IntSet interface
 // TODO(tqchen): revisit IntSet interface as well.
-Range IntSet::cover_range(Range max_range) const {
+Range IntSet::CoverRange(Range max_range) const {
   IntSet temp;
   Analyzer analyzer;
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   CHECK(s_int != nullptr);
   if (s_int->HasUpperBound() && s_int->HasLowerBound()) {
-    return Range::make_by_min_extent(s_int->min_value,
-                                     analyzer.Simplify(s_int->max_value + 1 - s_int->min_value));
+    return Range::FromMinExtent(s_int->min_value,
+                                analyzer.Simplify(s_int->max_value + 1 - s_int->min_value));
   }
   return max_range;
 }
@@ -517,34 +526,34 @@ PrimExpr IntSet::max() const {
   return s_int->max_value;
 }
 
-bool IntSet::is_nothing() const {
+bool IntSet::IsNothing() const {
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   return (s_int && s_int->IsEmpty());
 }
 
-bool IntSet::is_everything() const {
+bool IntSet::IsEverything() const {
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   return (s_int && s_int->IsEverything());
 }
 
-bool IntSet::is_single_point() const {
+bool IntSet::IsSinglePoint() const {
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   return (s_int && s_int->IsSinglePoint());
 }
 
-bool IntSet::can_prove_positive() const {
+bool IntSet::CanProvePositive() const {
   Analyzer analyzer;
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   return (s_int && is_positive_const(analyzer.Simplify(s_int->min_value)));
 }
 
-bool IntSet::can_prove_negative() const {
+bool IntSet::CanProveNegative() const {
   Analyzer analyzer;
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   return (s_int && is_negative_const(analyzer.Simplify(s_int->max_value)));
 }
 
-bool IntSet::can_prove_non_positive() const {
+bool IntSet::CanProveNonPositive() const {
   Analyzer analyzer;
   if (const auto* s_int = (*this).as<IntervalSetNode>()) {
     auto max = analyzer.Simplify(s_int->max_value);
@@ -553,7 +562,7 @@ bool IntSet::can_prove_non_positive() const {
   return false;
 }
 
-bool IntSet::can_prove_non_negative() const {
+bool IntSet::CanProveNonNegative() const {
   Analyzer analyzer;
   if (const IntervalSetNode* s_int = (*this).as<IntervalSetNode>()) {
     auto min = analyzer.Simplify(s_int->min_value);
@@ -562,32 +571,32 @@ bool IntSet::can_prove_non_negative() const {
   return false;
 }
 
-SignType IntSet::sign_type() const {
-  if (can_prove_positive()) {
+SignType IntSet::GetSignType() const {
+  if (CanProvePositive()) {
     return kPositive;
-  } else if (can_prove_negative()) {
+  } else if (CanProveNegative()) {
     return kNegative;
-  } else if (is_single_point() && is_zero(point_value())) {
+  } else if (IsSinglePoint() && is_zero(PointValue())) {
     return kZero;
   } else {
     return kUnknown;
   }
 }
-PrimExpr IntSet::point_value() const {
+PrimExpr IntSet::PointValue() const {
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   CHECK(s_int && s_int->IsSinglePoint());
   return s_int->min_value;
 }
 
-IntSet IntSet::nothing() { return IntervalSet::Empty(); }
+IntSet IntSet::Nothing() { return IntervalSet::Empty(); }
 
-IntSet IntSet::everything() { return IntervalSet::Everything(); }
+IntSet IntSet::Everything() { return IntervalSet::Everything(); }
 
-IntSet IntSet::single_point(PrimExpr x) { return IntervalSet::SinglePoint(x); }
+IntSet IntSet::SinglePoint(PrimExpr x) { return IntervalSet::SinglePoint(x); }
 
-IntSet IntSet::interval(PrimExpr min, PrimExpr max) {
+IntSet IntSet::Interval(PrimExpr min, PrimExpr max) {
   if (min.same_as(max)) {
-    return IntSet::single_point(min);
+    return IntSet::SinglePoint(min);
   }
   return IntervalSet(min, max);
 }
@@ -597,25 +606,26 @@ inline bool ProveEqual(Analyzer* analyzer, PrimExpr lhs, PrimExpr rhs) {
   return is_zero(analyzer->Simplify(lhs - rhs));
 }
 
-IntSet IntSet::range(Range r) {
+IntSet IntSet::FromRange(Range r) {
   // must make sure it can be matched back by MatchRange.
   if (is_one(r->extent)) {
-    return IntSet::single_point(r->min);
+    return IntSet::SinglePoint(r->min);
   }
   return IntervalSet(r->min, r->extent + r->min - 1);
 }
 
-bool IntSet::match_range(const Range& b) const {
+bool IntSet::MatchRange(const Range& b) const {
   const IntSet& a = *this;
   const IntervalSetNode* a_int = a.as<IntervalSetNode>();
   if (!a_int) return false;
+  if (!a_int->HasUpperBound() || !a_int->HasLowerBound()) return false;
   Analyzer ana;
   return ProveEqual(&ana, a_int->min_value, b->min) &&
          ProveEqual(&ana, a_int->max_value, b->extent + b->min - 1);
 }
 
 IntSet Union(const Array<IntSet>& sets) {
-  if (sets.size() == 0) return IntSet::nothing();
+  if (sets.size() == 0) return IntSet::Nothing();
   if (sets.size() == 1) return sets[0];
   Analyzer ana;
   IntervalSet x = ToIntervalSet(sets[0]);
@@ -626,7 +636,7 @@ IntSet Union(const Array<IntSet>& sets) {
 }
 
 IntSet Intersect(const Array<IntSet>& sets) {
-  if (sets.size() == 0) return IntSet::nothing();
+  if (sets.size() == 0) return IntSet::Nothing();
   if (sets.size() == 1) return sets[0];
   Analyzer ana;
   IntervalSet x = ToIntervalSet(sets[0]);
@@ -657,7 +667,7 @@ IntSet EvalSet(PrimExpr e, const Map<Var, IntSet>& dom_map) {
   return IntervalSetEvaluator(&ana, dom_map, false).Eval(e);
 }
 
-IntSet IntSet::vector(PrimExpr x) {
+IntSet IntSet::Vector(PrimExpr x) {
   Analyzer ana;
   Map<Var, IntSet> dmap;
   return IntervalSetEvaluator(&ana, dmap, true).Eval(x);
@@ -730,19 +740,19 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
                 << "[" << op->min_value << ", " << op->max_value << ']';
     });
 
-TVM_REGISTER_GLOBAL("arith.intset_single_point").set_body_typed(IntSet::single_point);
+TVM_REGISTER_GLOBAL("arith.intset_single_point").set_body_typed(IntSet::SinglePoint);
 
-TVM_REGISTER_GLOBAL("arith.intset_vector").set_body_typed(IntSet::vector);
+TVM_REGISTER_GLOBAL("arith.intset_vector").set_body_typed(IntSet::Vector);
 
-TVM_REGISTER_GLOBAL("arith.intset_interval").set_body_typed(IntSet::interval);
+TVM_REGISTER_GLOBAL("arith.intset_interval").set_body_typed(IntSet::Interval);
 
 TVM_REGISTER_GLOBAL("arith.IntervalSetGetMin").set_body_method(&IntSet::min);
 
 TVM_REGISTER_GLOBAL("arith.IntervalSetGetMax").set_body_method(&IntSet::max);
 
-TVM_REGISTER_GLOBAL("arith.IntSetIsNothing").set_body_method(&IntSet::is_nothing);
+TVM_REGISTER_GLOBAL("arith.IntSetIsNothing").set_body_method(&IntSet::IsNothing);
 
-TVM_REGISTER_GLOBAL("arith.IntSetIsEverything").set_body_method(&IntSet::is_everything);
+TVM_REGISTER_GLOBAL("arith.IntSetIsEverything").set_body_method(&IntSet::IsEverything);
 
 }  // namespace arith
 }  // namespace tvm

@@ -22,6 +22,7 @@
  */
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/op.h>
+#include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/stmt.h>
 
 namespace tvm {
@@ -262,6 +263,9 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 // Allocate
 Allocate::Allocate(Var buffer_var, DataType dtype, Array<PrimExpr> extents, PrimExpr condition,
                    Stmt body) {
+  // TODO(tvm-team): Add invariant check to make sure
+  // IsPointerPType(buffer_var->type_annotation, dtype)
+  // once we fix the allocate hybrid script printing.
   for (size_t i = 0; i < extents.size(); ++i) {
     CHECK(extents[i].defined());
     CHECK(extents[i].dtype().is_scalar());
@@ -372,25 +376,6 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
 
       p->PrintIndent();
       p->stream << "}\n";
-    });
-
-// Free
-Free::Free(Var buffer_var) {
-  ObjectPtr<FreeNode> node = make_object<FreeNode>();
-  node->buffer_var = buffer_var;
-  data_ = std::move(node);
-}
-
-TVM_REGISTER_GLOBAL("tir.Free").set_body_typed([](Var buffer_var) { return Free(buffer_var); });
-
-TVM_REGISTER_NODE_TYPE(FreeNode);
-
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<FreeNode>([](const ObjectRef& node, ReprPrinter* p) {
-      auto* op = static_cast<const FreeNode*>(node.get());
-      p->PrintIndent();
-      p->stream << "free " << op->buffer_var;
-      p->stream << '\n';
     });
 
 // Prefetch
@@ -582,5 +567,14 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
       p->PrintIndent();
       p->stream << "}\n";
     });
+
+PrimExpr TypeAnnotation(DataType dtype) {
+  static auto op = Op::Get("tir.type_annotation");
+  return tir::Call(dtype, op, {});
+}
+
+TVM_REGISTER_OP("tir.type_annotation")
+    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kPure));
+
 }  // namespace tir
 }  // namespace tvm

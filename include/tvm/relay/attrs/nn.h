@@ -85,7 +85,7 @@ struct Conv1DAttrs : public tvm::AttrsNode<Conv1DAttrs> {
         .set_default(NullValue<IndexExpr>());
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(data_layout)
         .set_default("NCW")
         .describe(
@@ -148,7 +148,7 @@ struct Conv2DAttrs : public tvm::AttrsNode<Conv2DAttrs> {
         .set_default(NullValue<IndexExpr>());
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(data_layout)
         .set_default("NCHW")
         .describe(
@@ -184,6 +184,17 @@ struct ConvWinogradWeightTransformAttrs : public tvm::AttrsNode<ConvWinogradWeig
                     "relay.attrs.ConvWinogradWeightTransformAttrs") {
     TVM_ATTR_FIELD(tile_size).describe(
         "Tile size of winograd. E.g. 2 for F(2x2, 3x3) and 4 for F(4x4, 3x3)");
+  }
+};
+
+/*! \brief Attributes used in gemm weight transformation operators */
+struct ConvGemmWeightTransformAttrs : public tvm::AttrsNode<ConvGemmWeightTransformAttrs> {
+  int tile_rows;
+  int tile_cols;
+
+  TVM_DECLARE_ATTRS(ConvGemmWeightTransformAttrs, "relay.attrs.ConvGemmWeightTransformAttrs") {
+    TVM_ATTR_FIELD(tile_rows).describe("Tile rows of the weight transformation for ConvGemm.");
+    TVM_ATTR_FIELD(tile_cols).describe("Tile columns of the weight transformation for ConvGemm.");
   }
 };
 
@@ -231,7 +242,7 @@ struct Conv2DWinogradAttrs : public tvm::AttrsNode<Conv2DWinogradAttrs> {
         .set_default(NullValue<IndexExpr>());
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(data_layout)
         .set_default("NCHW")
         .describe(
@@ -320,7 +331,7 @@ struct Conv3DAttrs : public tvm::AttrsNode<Conv3DAttrs> {
         .set_default(NullValue<IndexExpr>());
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(data_layout)
         .set_default("NCDHW")
         .describe(
@@ -370,7 +381,7 @@ struct Conv3DTransposeAttrs : public tvm::AttrsNode<Conv3DTransposeAttrs> {
             "i.e. the number of output channels in the convolution.");
     TVM_ATTR_FIELD(kernel_size)
         .describe("The dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(strides)
         .set_default(Array<IndexExpr>({1, 1, 1}))
         .describe("The strides of the convolution.");
@@ -469,7 +480,7 @@ struct Conv3DWinogradAttrs : public tvm::AttrsNode<Conv3DWinogradAttrs> {
         .set_default(NullValue<IndexExpr>());
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(data_layout)
         .set_default("NCDHW")
         .describe(
@@ -528,7 +539,7 @@ struct Conv2DTransposeAttrs : public tvm::AttrsNode<Conv2DTransposeAttrs> {
             "i.e. the number of output channels in the convolution.");
     TVM_ATTR_FIELD(kernel_size)
         .describe("The dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(strides)
         .set_default(Array<IndexExpr>({1, 1}))
         .describe("The strides of the convolution.");
@@ -615,7 +626,7 @@ struct Conv1DTransposeAttrs : public tvm::AttrsNode<Conv1DTransposeAttrs> {
             "i.e. the number of output channels in the convolution.");
     TVM_ATTR_FIELD(kernel_size)
         .describe("The dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(strides)
         .set_default(Array<IndexExpr>({1}))
         .describe("The strides of the convolution.");
@@ -1005,7 +1016,7 @@ struct UpSampling3DAttrs : public tvm::AttrsNode<UpSampling3DAttrs> {
 /*! \brief Attributes used for the padding operator */
 struct PadAttrs : public tvm::AttrsNode<PadAttrs> {
   double pad_value;
-  Array<Array<IndexExpr> > pad_width;
+  Array<Array<Integer>> pad_width;
   std::string pad_mode;
 
   TVM_DECLARE_ATTRS(PadAttrs, "relay.attrs.PadAttrs") {
@@ -1026,7 +1037,7 @@ struct PadAttrs : public tvm::AttrsNode<PadAttrs> {
 /*! \brief Attributes used for the MirrorPadding operator */
 struct MirrorPadAttrs : public tvm::AttrsNode<MirrorPadAttrs> {
   std::string mode;
-  Array<Array<IndexExpr> > pad_width;
+  Array<Array<IndexExpr>> pad_width;
 
   TVM_DECLARE_ATTRS(MirrorPadAttrs, "relay.attrs.MirrorPadAttrs") {
     TVM_ATTR_FIELD(mode)
@@ -1231,7 +1242,7 @@ struct DeformableConv2DAttrs : public tvm::AttrsNode<DeformableConv2DAttrs> {
         .set_default(NullValue<IndexExpr>());
     TVM_ATTR_FIELD(kernel_size)
         .describe("Specifies the dimensions of the convolution window.")
-        .set_default(NullValue<Array<IndexExpr> >());
+        .set_default(NullValue<Array<IndexExpr>>());
     TVM_ATTR_FIELD(data_layout)
         .set_default("NCHW")
         .describe(

@@ -18,7 +18,6 @@
  */
 
 use std::convert::TryFrom;
-use std::convert::TryInto;
 use std::ffi::CString;
 
 use crate::errors::Error;
@@ -28,87 +27,72 @@ use tvm_sys::{ArgValue, RetValue};
 
 mod object_ptr;
 
-pub use object_ptr::{IsObject, Object, ObjectPtr};
+pub use object_ptr::{IsObject, Object, ObjectPtr, ObjectRef};
 
-#[derive(Clone)]
-pub struct ObjectRef(pub Option<ObjectPtr<Object>>);
+// TODO we would prefer to blanket impl From/TryFrom ArgValue/RetValue, but we
+// can't because of coherence rules. Instead, we generate them in the macro, and
+// add what we can (including Into instead of From) as subtraits.
+// We also add named conversions for clarity
+pub trait IsObjectRef:
+    Sized
+    + Clone
+    + Into<RetValue>
+    + TryFrom<RetValue, Error = Error>
+    + for<'a> Into<ArgValue<'a>>
+    + for<'a> TryFrom<ArgValue<'a>, Error = Error>
+{
+    type Object: IsObject;
+    fn as_ptr(&self) -> Option<&ObjectPtr<Self::Object>>;
+    fn into_ptr(self) -> Option<ObjectPtr<Self::Object>>;
+    fn from_ptr(object_ptr: Option<ObjectPtr<Self::Object>>) -> Self;
 
-impl ObjectRef {
-    pub fn null() -> ObjectRef {
-        ObjectRef(None)
+    fn null() -> Self {
+        Self::from_ptr(None)
     }
-}
 
-pub trait ToObjectRef {
-    fn to_object_ref(&self) -> ObjectRef;
-}
-
-impl ToObjectRef for ObjectRef {
-    fn to_object_ref(&self) -> ObjectRef {
-        self.clone()
+    fn into_arg_value<'a>(self) -> ArgValue<'a> {
+        self.into()
     }
-}
 
-impl TryFrom<RetValue> for ObjectRef {
-    type Error = Error;
-
-    fn try_from(ret_val: RetValue) -> Result<ObjectRef, Self::Error> {
-        let optr = ret_val.try_into()?;
-        Ok(ObjectRef(Some(optr)))
+    fn from_arg_value<'a>(arg_value: ArgValue<'a>) -> Result<Self, Error> {
+        Self::try_from(arg_value)
     }
-}
 
-impl From<ObjectRef> for RetValue {
-    fn from(object_ref: ObjectRef) -> RetValue {
-        use std::ffi::c_void;
-        let object_ptr = object_ref.0;
-        match object_ptr {
-            None => RetValue::ObjectHandle(std::ptr::null::<c_void>() as *mut c_void),
-            Some(value) => value.clone().into(),
-        }
+    fn into_ret_value<'a>(self) -> RetValue {
+        self.into()
     }
-}
 
-impl<'a> std::convert::TryFrom<ArgValue<'a>> for ObjectRef {
-    type Error = Error;
-
-    fn try_from(arg_value: ArgValue<'a>) -> Result<ObjectRef, Self::Error> {
-        let optr = arg_value.try_into()?;
-        Ok(ObjectRef(Some(optr)))
+    fn from_ret_value<'a>(ret_value: RetValue) -> Result<Self, Error> {
+        Self::try_from(ret_value)
     }
-}
 
-impl<'a> std::convert::TryFrom<&ArgValue<'a>> for ObjectRef {
-    type Error = Error;
-
-    fn try_from(arg_value: &ArgValue<'a>) -> Result<ObjectRef, Self::Error> {
-        // TODO(@jroesch): remove the clone
-        let value: ArgValue<'a> = arg_value.clone();
-        ObjectRef::try_from(value)
+    fn upcast<U>(self) -> U
+    where
+        U: IsObjectRef,
+        Self::Object: AsRef<U::Object>,
+    {
+        let ptr = self.into_ptr().map(ObjectPtr::upcast);
+        U::from_ptr(ptr)
     }
-}
 
-impl<'a> From<ObjectRef> for ArgValue<'a> {
-    fn from(object_ref: ObjectRef) -> ArgValue<'a> {
-        use std::ffi::c_void;
-        let object_ptr = &object_ref.0;
-        match object_ptr {
-            None => ArgValue::ObjectHandle(std::ptr::null::<c_void>() as *mut c_void),
-            Some(value) => value.clone().into(),
-        }
-    }
-}
-
-impl<'a> From<&ObjectRef> for ArgValue<'a> {
-    fn from(object_ref: &ObjectRef) -> ArgValue<'a> {
-        let oref: ObjectRef = object_ref.clone();
-        ArgValue::<'a>::from(oref)
+    fn downcast<U>(self) -> Result<U, Error>
+    where
+        U: IsObjectRef,
+        U::Object: AsRef<Self::Object>,
+    {
+        let ptr = self.into_ptr().map(ObjectPtr::downcast);
+        let ptr = ptr.transpose()?;
+        Ok(U::from_ptr(ptr))
     }
 }
 
 external! {
     #[name("ir.DebugPrint")]
     fn debug_print(object: ObjectRef) -> CString;
+    #[name("node.StructuralHash")]
+    fn structural_hash(object: ObjectRef, map_free_vars: bool) -> ObjectRef;
+    #[name("node.StructuralEqual")]
+    fn structural_equal(lhs: ObjectRef, rhs: ObjectRef, assert_mode: bool, map_free_vars: bool) -> ObjectRef;
 }
 
 // external! {
